@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Iterable
 
-from vllm_beam_search.scheduler import BeamSearchScheduler
+from vllm_beam_search.beam_state import BeamGroup
+from vllm_beam_search.scheduler import BeamSearchScheduler, _BeamKVCacheManager
 
 
 @dataclass
@@ -26,6 +28,55 @@ class FakeManager:
     def __init__(self, blocks: list[FakeBlock]) -> None:
         self.req_to_blocks = {"dst": blocks}
         self.num_cached_block = {"dst": len(blocks)}
+
+
+class FakeKVCacheManager:
+    def __init__(self) -> None:
+        self.enable_caching = False
+        self.empty_kv_cache_blocks = object()
+        self.single_type_manager = SimpleNamespace(
+            req_to_blocks={"beam": [object()]},
+            block_size=16,
+        )
+        self.coordinator = SimpleNamespace(
+            single_type_managers=[self.single_type_manager]
+        )
+        self.allocate_calls = 0
+
+    def allocate_slots(self, *_args, **_kwargs):
+        self.allocate_calls += 1
+        return object()
+
+
+def make_beam_request(num_computed_tokens: int):
+    return SimpleNamespace(
+        request_id="beam",
+        num_computed_tokens=num_computed_tokens,
+        num_prompt_tokens=1,
+        sampling_params=SimpleNamespace(
+            extra_args={"_beam_group_id": "group"}
+        ),
+    )
+
+
+def test_beam_kv_manager_skips_allocation_inside_existing_page() -> None:
+    manager = FakeKVCacheManager()
+    beam_manager = _BeamKVCacheManager(manager)
+
+    blocks = beam_manager.allocate_slots(make_beam_request(13), 3)
+
+    assert blocks is manager.empty_kv_cache_blocks
+    assert manager.allocate_calls == 0
+
+
+def test_beam_kv_manager_allocates_at_page_boundary() -> None:
+    manager = FakeKVCacheManager()
+    beam_manager = _BeamKVCacheManager(manager)
+
+    blocks = beam_manager.allocate_slots(make_beam_request(14), 3)
+
+    assert blocks is not manager.empty_kv_cache_blocks
+    assert manager.allocate_calls == 1
 
 
 def test_replace_request_blocks_preserves_async_suffix() -> None:
@@ -73,3 +124,15 @@ def test_snapshot_source_prefix_keeps_partial_cow_computed() -> None:
 
     assert [block.block_id for block in snapshot.blocks_by_manager[0]] == [10]
     assert snapshot.num_computed_tokens == 5
+
+
+def test_group_finalizes_when_async_terminal_output_has_no_transition() -> None:
+    scheduler = BeamSearchScheduler.__new__(BeamSearchScheduler)
+    scheduler.requests = {}
+    group = BeamGroup("request", SimpleNamespace(), 2)
+    group.beam_request_ids = ["request:beam:0", "request:beam:1"]
+
+    assert scheduler._should_finalize_group(group, None, [0, 1], set())
+
+    scheduler.requests[group.beam_request_ids[0]] = SimpleNamespace()
+    assert not scheduler._should_finalize_group(group, None, [0, 1], set())

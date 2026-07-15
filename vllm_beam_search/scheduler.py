@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import copy
 import inspect
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -284,6 +283,67 @@ class _PrefixSnapshot:
     blocks_by_manager: dict[int, list[Any]]
 
 
+class _BeamKVCacheManager:
+    """Skip general KV allocation when a beam token fits existing pages."""
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+        self._self_attn_managers = tuple(
+            single_type_manager
+            for single_type_manager in manager.coordinator.single_type_managers
+            if not isinstance(single_type_manager, CrossAttentionManager)
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager, name)
+
+    def allocate_slots(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        **kwargs: Any,
+    ) -> Any:
+        if self._fits_existing_beam_pages(request, num_new_tokens, kwargs):
+            return self._manager.empty_kv_cache_blocks
+        return self._manager.allocate_slots(request, num_new_tokens, **kwargs)
+
+    def _fits_existing_beam_pages(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        kwargs: dict[str, Any],
+    ) -> bool:
+        sampling_params = request.sampling_params
+        extra = sampling_params.extra_args if sampling_params is not None else None
+        if not extra or "_beam_group_id" not in extra:
+            return False
+        if request.num_computed_tokens < request.num_prompt_tokens:
+            return False
+        if num_new_tokens < 1 or self._manager.enable_caching:
+            return False
+        if any(
+            kwargs.get(name, default) != default
+            for name, default in (
+                ("num_new_computed_tokens", 0),
+                ("new_computed_blocks", None),
+                ("num_lookahead_tokens", 0),
+                ("num_external_computed_tokens", 0),
+                ("delay_cache_blocks", False),
+                ("num_encoder_tokens", 0),
+                ("full_sequence_must_fit", False),
+                ("reserved_blocks", 0),
+            )
+        ):
+            return False
+        required_tokens = request.num_computed_tokens + num_new_tokens
+        return all(
+            len(manager.req_to_blocks.get(request.request_id, ()))
+            * manager.block_size
+            >= required_tokens
+            for manager in self._self_attn_managers
+        )
+
+
 class BeamSearchScheduler(Scheduler):
     """V1 scheduler running `beam_width` sibling requests per beam group."""
 
@@ -328,6 +388,7 @@ class BeamSearchScheduler(Scheduler):
         # Indices of the decoder (self-attention) KV managers — everything
         # that is not cross-attention. Computed lazily on first use.
         self._self_attn_mgr_idxs: list[int] | None = None
+        self.kv_cache_manager = _BeamKVCacheManager(self.kv_cache_manager)
 
     def _update_after_schedule(self, scheduler_output: "SchedulerOutput") -> None:
         super()._update_after_schedule(scheduler_output)
@@ -372,6 +433,8 @@ class BeamSearchScheduler(Scheduler):
                 request,
                 request.num_computed_tokens - request.num_output_placeholders,
             )
+        if request.request_id in self.beam_to_group and not stopped:
+            return [], False
         return new_token_ids, stopped
 
     # ------------------------------------------------------------------
@@ -499,11 +562,11 @@ class BeamSearchScheduler(Scheduler):
         public_finished: dict[str, int] = {}
         kept: list[tuple[str, int]] = []
         for req_id, client_index in finished:
-            gid = child_to_orig.get(req_id)
-            if gid is None:
+            group_id = child_to_orig.get(req_id)
+            if group_id is None:
                 kept.append((req_id, client_index))
                 continue
-            group = cleanup_groups.get(gid)
+            group = cleanup_groups.get(group_id)
             if group is not None:
                 public_finished[group.orig_request_id] = (
                     group.orig_request.client_index
@@ -624,13 +687,18 @@ class BeamSearchScheduler(Scheduler):
 
             transition = transitions.get(group.orig_request_id)
             if transition is not None:
+                group.last_transition = transition
                 self._drain_beam_transition(group, transition)
 
             active_slots = self._active_slots(group, transition)
             if self._should_finalize_group(
                 group, transition, active_slots, finished_children
             ):
-                self._finalize_group(group, outputs, transition)
+                self._finalize_group(
+                    group,
+                    outputs,
+                    transition or group.last_transition,
+                )
                 continue
 
             self._apply_fork_plan(group, transition, active_slots)
@@ -696,7 +764,10 @@ class BeamSearchScheduler(Scheduler):
             return True
 
         if transition is None:
-            return False
+            return all(
+                request_id not in self.requests
+                for request_id in group.beam_request_ids
+            )
 
         if not active_slots:
             return True
@@ -774,7 +845,6 @@ class BeamSearchScheduler(Scheduler):
         for dst, src in rebases:
             self._rebase_slot(
                 group,
-                transition,
                 dst,
                 snapshots[src],
                 self_idxs,
@@ -814,7 +884,9 @@ class BeamSearchScheduler(Scheduler):
             if src in snapshots:
                 continue
             src_req = group.beam_requests[src]
-            kv_prefix_len = len(src_req.prompt_token_ids or []) + output_prefix_len
+            kv_prefix_len = (
+                len(src_req.prompt_token_ids or []) + output_prefix_len
+            )
             snapshots[src] = self._snapshot_source_prefix(
                 group.beam_request_ids[src],
                 kv_prefix_len,
@@ -856,7 +928,6 @@ class BeamSearchScheduler(Scheduler):
     def _rebase_slot(
         self,
         group: BeamGroup,
-        transition: BeamTransition,
         dst: int,
         src_snap: _PrefixSnapshot,
         self_idxs: list[int],
@@ -881,8 +952,15 @@ class BeamSearchScheduler(Scheduler):
                 prefix_blocks=len(new_blocks),
             )
 
-        self._rewrite_rebased_request(dst_req, transition, dst, n_prefix)
+        self._rewrite_rebased_request(dst_req, n_prefix)
         self.prev_step_scheduled_req_ids.discard(dst_id)
+
+    @staticmethod
+    def _rewrite_rebased_request(
+        dst_req: Request,
+        num_computed_tokens: int,
+    ) -> None:
+        dst_req.num_computed_tokens = num_computed_tokens
 
     @staticmethod
     def _replace_request_blocks(
@@ -907,27 +985,6 @@ class BeamSearchScheduler(Scheduler):
         num_cached = getattr(mgr, "num_cached_block", None)
         if num_cached is not None:
             num_cached[dst_id] = len(new_blocks)
-
-    def _rewrite_rebased_request(
-        self,
-        dst_req: Request,
-        transition: BeamTransition,
-        dst: int,
-        num_computed_tokens: int,
-    ) -> None:
-        new_output = list(transition.tokens[dst])
-        dst_req._output_token_ids.clear()
-        dst_req._output_token_ids.extend(new_output)
-        dst_req._all_token_ids.clear()
-        dst_req._all_token_ids.extend(list(dst_req.prompt_token_ids) + new_output)
-        dst_req.num_computed_tokens = num_computed_tokens
-
-        # Token state was rewritten in-place, bypassing append_token_id's
-        # incremental hashing; recompute block_hashes so the base scheduler's
-        # cache_full_blocks assertion stays satisfied.
-        if getattr(dst_req, "_block_hasher", None) is not None:
-            dst_req.block_hashes = []
-            dst_req.update_block_hashes()
 
     # ------------------------------------------------------------------
     # Finalize
@@ -975,7 +1032,7 @@ class BeamSearchScheduler(Scheduler):
 
         best_slot, best_norm = None, float("-inf")
         for slot in self._active_slots(group, transition):
-            toks = transition.tokens[slot] if slot < len(transition.tokens) else []
+            toks = self._transition_tokens(transition, slot)
             if not toks:
                 continue
             length = self._beam_length(group, toks)
@@ -986,13 +1043,25 @@ class BeamSearchScheduler(Scheduler):
         if best_slot is None:
             return None
 
-        tokens = list(transition.tokens[best_slot])
+        tokens = self._transition_tokens(transition, best_slot)
         return CompletedBeam(
             tokens=tokens,
             cum_score=transition.cum[best_slot],
             length=self._beam_length(group, tokens),
             finish_reason="length",
         )
+
+    @staticmethod
+    def _transition_tokens(
+        transition: BeamTransition,
+        slot: int,
+    ) -> list[int]:
+        if slot >= len(transition.tokens):
+            return []
+        tokens = transition.tokens[slot]
+        if hasattr(tokens, "tolist"):
+            return tokens.tolist()
+        return list(tokens)
 
     @staticmethod
     def _tokens_with_eos(group: BeamGroup, tokens: list[int]) -> list[int]:

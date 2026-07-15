@@ -7,8 +7,12 @@ and completed-beam records.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from .beam_types import BeamTransition
 
 
 @dataclass
@@ -39,11 +43,11 @@ class BeamGroup:
     length_penalty: float = 1.0
 
     beam_request_ids: list[str] = field(default_factory=list)
-    # Refs to the beam-child Request objects; held so we can read their
-    # final `output_token_ids` even after the base scheduler removes them
-    # from `self.requests` on finish.
+    # Retain child objects and the last compact GPU transition so terminal
+    # async output can be emitted after the base scheduler removes children.
     beam_requests: list[Request] = field(default_factory=list)
     completed: list[CompletedBeam] = field(default_factory=list)
+    last_transition: BeamTransition | None = None
     # Set of beam_indices that have finished (so we don't double-record).
     finished_beam_indices: set[int] = field(default_factory=set)
 

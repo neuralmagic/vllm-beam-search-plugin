@@ -642,8 +642,8 @@ def test_select_handles_mixed_lengths_in_one_bucket() -> None:
         transition.group_id: transition
         for transition in staged.to_output()
     }
-    assert by_gid["g0"].tokens == ((5,), (6,))
-    assert by_gid["g1"].tokens == ((7, 0, 9), (7, 0, 10))
+    assert by_gid["g0"].tokens.tolist() == [[5], [6]]
+    assert by_gid["g1"].tokens.tolist() == [[7, 0, 9], [7, 0, 10]]
 
 
 def test_select_materializes_eos_completions() -> None:
@@ -801,8 +801,8 @@ def test_async_beam_transitions_use_persistent_gpu_slot_buffer() -> None:
 
     out = staged.to_output()
     assert [transition.group_id for transition in out] == ["g0", "g1"]
-    assert out[0].tokens == ((11, 12, 13), (21, 22, 23))
-    assert out[1].tokens == ((31, 32, 33), (41, 42, 43))
+    assert out[0].tokens.tolist() == [[11, 12, 13], [21, 22, 23]]
+    assert out[1].tokens.tolist() == [[31, 32, 33], [41, 42, 43]]
 
     staged_again = AsyncBeamTransitions(
         gpu_transitions,
@@ -816,3 +816,22 @@ def test_async_beam_transitions_use_persistent_gpu_slot_buffer() -> None:
         if key[0] == "tokens"
     ]
     assert token_buffers[0].data_ptr() == token_buffer_ptr
+
+
+def test_async_transition_omits_live_state_before_length_stop() -> None:
+    transitions = _gpu_transitions(
+        gids=("gid",),
+        prefix_lens=(2,),
+        active_counts=(2,),
+        req_idx_by_group=torch.tensor([[0, 1]], device=DEVICE),
+        dst_slots=torch.tensor([[0, 1]], device=DEVICE),
+        src_slots=torch.tensor([[0, 1]], device=DEVICE),
+        tokens=torch.tensor([[[1, 2, 3], [1, 2, 4]]], device=DEVICE),
+    )
+    transitions.export_live_state = False
+
+    tensors = transitions.async_tensors()
+
+    assert tensors["tokens"] is None
+    assert tensors["cum"] is None
+    assert tensors["fork_src"] is transitions.fork_src

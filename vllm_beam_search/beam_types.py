@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 _INIT_NEG = -1e9
@@ -11,9 +12,9 @@ class BeamTransition:
     step_id: int
     prefix_len: int
     active_slots: tuple[int, ...]
-    fork_src: tuple[int, ...]
-    tokens: tuple[tuple[int, ...], ...]
-    cum: tuple[float, ...]
+    fork_src: Sequence[int]
+    tokens: Sequence[Sequence[int]]
+    cum: Sequence[float]
     completions: tuple[tuple[tuple[int, ...], float], ...] = ()
 
 
@@ -23,3 +24,4 @@ class BeamRuntime:
     eos_token_id: int | None
     no_repeat_ngram_size: int = 0
     prompt_tokens: list[int] = field(default_factory=list)
+    max_tokens: int | None = None

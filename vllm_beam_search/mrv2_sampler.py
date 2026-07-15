@@ -818,6 +818,7 @@ class _BeamTransitionsGpu:
     completion_tokens: torch.Tensor | None = None
     completion_prefixes: torch.Tensor | None = None
     completion_lens: tuple[int, ...] = ()
+    export_live_state: bool = True
 
     def __bool__(self) -> bool:
         return bool(self.gids)
@@ -827,8 +828,8 @@ class _BeamTransitionsGpu:
         return {
             "fork_src": self.fork_src,
             "active_mask": self.active_mask,
-            "tokens": self.tokens,
-            "cum": self.cum,
+            "tokens": self.tokens if self.export_live_state else None,
+            "cum": self.cum if self.export_live_state else None,
             "completion_scores": self.completion_scores,
             "completion_slots": self.completion_slots,
             "completion_tokens": self.completion_tokens,
@@ -1072,6 +1073,7 @@ class BeamSearchMRV2Sampler:
                 eos_token_id=int(eos) if eos is not None else None,
                 no_repeat_ngram_size=no_repeat,
                 prompt_tokens=list(prompt_token_ids or []),
+                max_tokens=sampling_params.max_tokens,
             )
             self.groups[gid] = gr
             self._init_gpu_group_state(gid, gr)
@@ -1381,6 +1383,11 @@ class BeamSearchMRV2Sampler:
                 completion_prefixes if eos_completion_scores is not None else None
             ),
             completion_lens=completion_lens,
+            export_live_state=any(
+                self.groups[gid].max_tokens is None
+                or state.length - state.prompt_len >= self.groups[gid].max_tokens
+                for gid, state in group_states
+            ),
         )
 
     def _collect_group_states(
@@ -1956,19 +1963,12 @@ def _materialize_transition(data: dict[str, Any]) -> BeamTransition:
     prompt_len = int(data["prompt_len"])
     prefix_len = int(data["prefix_len"])
     length = prefix_len + 1
-    token_sequences = data["tokens"][:, :length].tolist()
-    generated = [
-        tuple(int(tok) for tok in sequence[prompt_len:length])
-        for sequence in token_sequences
-    ]
-    cum = tuple(float(x) for x in data["cum"].tolist())
-    fork_src = tuple(int(x) for x in data["fork_src"].tolist())
-    active_mask = data["active_mask"].tolist()
-    active_slots = tuple(
-        slot
-        for slot, active in enumerate(active_mask)
-        if active
-    )
+    token_data = data.get("tokens")
+    generated = () if token_data is None else token_data[:, prompt_len:length]
+    cum_data = data.get("cum")
+    cum = () if cum_data is None else cum_data.numpy()
+    fork_src = data["fork_src"].numpy()
+    active_slots = tuple(np.flatnonzero(data["active_mask"].numpy()))
 
     completions: list[tuple[tuple[int, ...], float]] = []
     completion_scores = data.get("completion_scores")
@@ -1984,9 +1984,9 @@ def _materialize_transition(data: dict[str, Any]) -> BeamTransition:
             and completion_slots is not None
             and completion_tokens is not None
         ):
-            scores = completion_scores.tolist()
-            slots = completion_slots.tolist()
-            tokens = completion_tokens.tolist()
+            scores = completion_scores.numpy()
+            slots = completion_slots.numpy()
+            tokens = completion_tokens.numpy()
             for slot, token, score in zip(slots, tokens, scores):
                 if score <= _INIT_NEG / 2:
                     continue
@@ -2006,7 +2006,7 @@ def _materialize_transition(data: dict[str, Any]) -> BeamTransition:
         prefix_len=int(data["prefix_len"]) - prompt_len,
         active_slots=active_slots,
         fork_src=fork_src,
-        tokens=tuple(generated),
+        tokens=generated,
         cum=cum,
         completions=tuple(completions),
     )
