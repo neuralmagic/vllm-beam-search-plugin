@@ -1145,6 +1145,7 @@ class BeamSearchMRV2Sampler:
         processed_logits = sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
+            input_batch.idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
@@ -1164,11 +1165,10 @@ class BeamSearchMRV2Sampler:
         input_batch: InputBatch,
         num_nans: torch.Tensor | None,
     ) -> SamplerOutput:
-        sampled = torch.zeros(
-            input_batch.num_reqs,
-            dtype=torch.int64,
-            device=processed_logits.device,
-        )
+        # Greedy default for any non-beam rows sharing the batch; the beam
+        # rewrite kernel overwrites beam rows via slot_to_batch.
+        last_logit_idx = (input_batch.cu_num_logits[1:].long() - 1).clamp_min_(0)
+        sampled = processed_logits[last_logit_idx].argmax(dim=-1)
         transitions = self._gpu_select_groups(
             processed_logits=processed_logits,
             input_batch=input_batch,
@@ -1851,7 +1851,14 @@ class _TransitionBufferPool:
         value: torch.Tensor,
         slot: int,
     ) -> torch.Tensor:
-        buffer_key = (key, tuple(value.shape[1:]), value.dtype, value.device)
+        # Bucket variable dims (e.g. sequence length) to powers of two so the
+        # buffer dict stays log-bounded instead of growing one persistent
+        # buffer per distinct shape.
+        inner = tuple(value.shape[1:])
+        padded_inner = tuple(
+            triton.next_power_of_2(max(int(dim), 1)) for dim in inner
+        )
+        buffer_key = (key, padded_inner, value.dtype, value.device)
         buffer = self._buffers.get(buffer_key)
         group_count = value.shape[0]
         if buffer is None or buffer.shape[1] < group_count:
@@ -1859,12 +1866,15 @@ class _TransitionBufferPool:
             if buffer is not None:
                 capacity = max(capacity, buffer.shape[1] * 2)
             self._buffers[buffer_key] = torch.empty(
-                (self.num_slots, capacity, *value.shape[1:]),
+                (self.num_slots, capacity, *padded_inner),
                 dtype=value.dtype,
                 device=value.device,
             )
             buffer = self._buffers[buffer_key]
-        return buffer[slot, :group_count]
+        view = buffer[slot, :group_count]
+        for dim, size in enumerate(inner):
+            view = view.narrow(dim + 1, 0, size)
+        return view
 
 
 class AsyncBeamTransitions:

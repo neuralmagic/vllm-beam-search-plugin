@@ -22,12 +22,12 @@ Per step (`update_from_output`):
 from __future__ import annotations
 
 import copy
-import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
@@ -83,6 +83,8 @@ def _patch_mrv2_sampler_async_outputs() -> None:
             num_sampled_tokens: Any,
             main_stream: Any,
             copy_stream: Any,
+            *args: Any,
+            **kwargs: Any,
         ) -> None:
             super().__init__(
                 model_runner_output,
@@ -90,6 +92,8 @@ def _patch_mrv2_sampler_async_outputs() -> None:
                 num_sampled_tokens,
                 main_stream,
                 copy_stream,
+                *args,
+                **kwargs,
             )
             self._vllm_beam_async_outputs = None
             async_outputs = getattr(sampler_output, "async_outputs", None)
@@ -201,8 +205,13 @@ def _attach_beam_sampler_to_model_state(
         if beam_sampler is not None:
             beam_sampler.remove_request(req_id)
 
-    def postprocess_state(idx_mapping: Any, num_sampled: Any) -> None:
-        original_postprocess_state(idx_mapping, num_sampled)
+    def postprocess_state(
+        idx_mapping: Any,
+        num_sampled: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        original_postprocess_state(idx_mapping, num_sampled, *args, **kwargs)
         beam_sampler = getattr(model_state, "_vllm_beam_sampler", None)
         if beam_sampler is not None:
             beam_sampler.apply_pending_rewrites()
@@ -344,7 +353,7 @@ class _BeamKVCacheManager:
         )
 
 
-class BeamSearchScheduler(Scheduler):
+class BeamSearchScheduler(AsyncScheduler):
     """V1 scheduler running `beam_width` sibling requests per beam group."""
 
     def __init__(
@@ -382,57 +391,21 @@ class BeamSearchScheduler(Scheduler):
 
         self.beam_groups: dict[str, BeamGroup] = {}
         self.beam_to_group: dict[str, str] = {}
-        self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
-        self.pp_size = self.parallel_config.pipeline_parallel_size
 
         # Indices of the decoder (self-attention) KV managers — everything
         # that is not cross-attention. Computed lazily on first use.
         self._self_attn_mgr_idxs: list[int] | None = None
         self.kv_cache_manager = _BeamKVCacheManager(self.kv_cache_manager)
 
-    def _update_after_schedule(self, scheduler_output: "SchedulerOutput") -> None:
-        super()._update_after_schedule(scheduler_output)
-
-        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
-        for req_id in scheduler_output.num_scheduled_tokens:
-            request = self.requests[req_id]
-            if request.is_prefill_chunk:
-                continue
-
-            scheduler_output.pending_structured_output_tokens |= (
-                request.use_structured_output
-                and request.num_output_placeholders > 0
-            )
-            cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
-            request.num_output_placeholders += (
-                self.num_sampled_tokens_per_step + cur_num_spec_tokens
-            )
-            request.spec_token_ids = self._spec_token_placeholders
-
-            request.next_decode_eligible_step = self.current_step + self.pp_size
-
     def _update_request_with_output(
         self,
         request: Request,
         new_token_ids: list[int],
+        is_stale: bool = False,
     ) -> tuple[list[int], bool]:
-        if request.async_tokens_to_discard > 0:
-            request.async_tokens_to_discard -= 1
-            return [], False
-
-        status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
-            request, new_token_ids
+            request, new_token_ids, is_stale
         )
-
-        request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
-
-        if status_before_update == RequestStatus.RUNNING:
-            self.kv_cache_manager.cache_blocks(
-                request,
-                request.num_computed_tokens - request.num_output_placeholders,
-            )
         if request.request_id in self.beam_to_group and not stopped:
             return [], False
         return new_token_ids, stopped
@@ -544,7 +517,7 @@ class BeamSearchScheduler(Scheduler):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: RequestStatus,
-    ) -> list[tuple[str, int]]:
+    ) -> list[Request]:
         request_ids = self._normalize_finish_ids(request_ids)
         cleanup_groups, child_to_orig, expanded_ids = (
             self._expand_finish_request_ids(request_ids)
@@ -559,23 +532,21 @@ class BeamSearchScheduler(Scheduler):
         # through the base scheduler, then remove all plugin-owned group state
         # so has_requests()/get_num_unfinished_requests() cannot stay true
         # forever after a client disconnect.
-        public_finished: dict[str, int] = {}
-        kept: list[tuple[str, int]] = []
-        for req_id, client_index in finished:
-            group_id = child_to_orig.get(req_id)
+        public_finished: dict[str, Request] = {}
+        kept: list[Request] = []
+        for request in finished:
+            group_id = child_to_orig.get(request.request_id)
             if group_id is None:
-                kept.append((req_id, client_index))
+                kept.append(request)
                 continue
             group = cleanup_groups.get(group_id)
             if group is not None:
-                public_finished[group.orig_request_id] = (
-                    group.orig_request.client_index
-                )
+                public_finished[group.orig_request_id] = group.orig_request
 
         for group in cleanup_groups.values():
             self._cleanup_group(group)
 
-        kept.extend(public_finished.items())
+        kept.extend(public_finished.values())
         return kept
 
     @staticmethod
@@ -632,11 +603,7 @@ class BeamSearchScheduler(Scheduler):
     # ------------------------------------------------------------------
 
     def schedule(self, throttle_prefills: bool = False) -> "SchedulerOutput":
-        schedule = super().schedule
-        if inspect.signature(schedule).parameters:
-            scheduler_output = schedule(throttle_prefills)
-        else:
-            scheduler_output = schedule()
+        scheduler_output = super().schedule(throttle_prefills)
         self._clamp_async_beam_decode_chunks(scheduler_output)
         return scheduler_output
 
@@ -819,10 +786,7 @@ class BeamSearchScheduler(Scheduler):
     ) -> list[int]:
         if transition is None:
             return list(range(group.beam_width))
-        return [
-            slot for slot in transition.active_slots[:group.beam_width]
-            if slot not in group.finished_beam_indices
-        ]
+        return list(transition.active_slots[:group.beam_width])
 
     def _apply_fork_plan(
         self,

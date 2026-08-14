@@ -48,8 +48,6 @@ class BeamGroup:
     beam_requests: list[Request] = field(default_factory=list)
     completed: list[CompletedBeam] = field(default_factory=list)
     last_transition: BeamTransition | None = None
-    # Set of beam_indices that have finished (so we don't double-record).
-    finished_beam_indices: set[int] = field(default_factory=set)
 
     # True after we've emitted the final EngineCoreOutput for this group;
     # the scheduler uses this to suppress duplicate emissions.
