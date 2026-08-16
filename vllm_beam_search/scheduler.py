@@ -1,10 +1,11 @@
 """BeamSearchScheduler — MRV2 async plugin doing in-flight beam search.
 
 Matches the HF / V0 algorithm. At `add_request` we materialize
-`beam_width` sibling Request objects (one per beam) and add them all to
-the base scheduler. The MRV2 sampler makes per-step beam decisions and
-emits `BeamTransition` records; this scheduler reconciles the CPU-side
-request/KV bookkeeping when those async outputs arrive.
+`beam_width` sibling Request objects (one per beam). Small scheduler budget
+hooks reserve sequence slots and require the aggregate token/KV demand to fit,
+so a beam group advances as one scheduling candidate. The MRV2 sampler makes
+per-step beam decisions and emits `BeamTransition` records; this scheduler
+reconciles the CPU-side request/KV bookkeeping when those async outputs arrive.
 
 Per step (`update_from_output`):
   1. Suppress the beam-children outputs from the engine stream.
@@ -19,13 +20,15 @@ Per step (`update_from_output`):
      private partial block. Cross-attention (encoder) KV is identical
      across beams and left untouched.
 """
+
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -33,8 +36,9 @@ from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.request import Request, RequestStatus
 
-from .beam_types import BeamTransition
 from .beam_state import BeamGroup, CompletedBeam
+from .beam_types import BeamTransition
+from .validation import validate_beam_xargs
 
 _BEAM_TRANSITIONS_OUTPUT = "vllm_beam_search.transitions"
 
@@ -66,8 +70,8 @@ def _is_beam_scheduler_config(vllm_config: Any) -> bool:
 def _patch_mrv2_sampler_async_outputs() -> None:
     """Carry optional sampler async payloads through MRV2 AsyncOutput."""
     try:
-        import vllm.v1.worker.gpu.async_utils as async_utils
         import vllm.v1.worker.gpu.model_runner as model_runner_module
+        from vllm.v1.worker.gpu import async_utils
     except ImportError:
         return
 
@@ -119,7 +123,7 @@ def _patch_mrv2_sampler_async_outputs() -> None:
             for key, value in async_outputs.items():
                 to_output = getattr(value, "to_output", None)
                 custom_outputs[key] = to_output() if to_output is not None else value
-            setattr(output, "custom_outputs", custom_outputs)
+            output.custom_outputs = custom_outputs
             return output
 
     BeamAsyncOutput._vllm_beam_async_outputs_patched = True
@@ -179,7 +183,7 @@ def _attach_beam_sampler_to_model_state(
         from vllm_beam_search.mrv2_sampler import BeamSearchMRV2Sampler
 
         beam_sampler = BeamSearchMRV2Sampler(sampler, vllm_config, device)
-        setattr(model_state, "_vllm_beam_sampler", beam_sampler)
+        model_state._vllm_beam_sampler = beam_sampler
         _configure_beam_sampler_from_model_state(model_state, beam_sampler)
         return beam_sampler, rejection_sampler
 
@@ -245,8 +249,8 @@ def _configure_beam_sampler_from_model_state(
 def _patch_mrv2_gpu_model_runner_history_rewrites() -> None:
     """Give MRV2 custom samplers access to worker KV/block state."""
     try:
-        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
         from vllm.v1.kv_cache_interface import CrossAttentionSpec
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     except ImportError:
         return
 
@@ -266,13 +270,11 @@ def _patch_mrv2_gpu_model_runner_history_rewrites() -> None:
             for idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
             if not isinstance(group.kv_cache_spec, CrossAttentionSpec)
         )
-        setattr(model_state, "_vllm_beam_block_tables", block_tables)
-        setattr(model_state, "_vllm_beam_self_attn_groups", self_attn_groups)
-        setattr(model_state, "_vllm_beam_kv_cache_config", self.kv_cache_config)
-        setattr(
-            model_state,
-            "_vllm_beam_forward_context",
-            self.compilation_config.static_forward_context,
+        model_state._vllm_beam_block_tables = block_tables
+        model_state._vllm_beam_self_attn_groups = self_attn_groups
+        model_state._vllm_beam_kv_cache_config = self.kv_cache_config
+        model_state._vllm_beam_forward_context = (
+            self.compilation_config.static_forward_context
         )
         _configure_beam_sampler_from_model_state(model_state)
 
@@ -295,8 +297,13 @@ class _PrefixSnapshot:
 class _BeamKVCacheManager:
     """Skip general KV allocation when a beam token fits existing pages."""
 
-    def __init__(self, manager: Any) -> None:
+    def __init__(
+        self,
+        manager: Any,
+        remaining_siblings: Callable[[Request], int] | None = None,
+    ) -> None:
         self._manager = manager
+        self._remaining_siblings = remaining_siblings
         self._self_attn_managers = tuple(
             single_type_manager
             for single_type_manager in manager.coordinator.single_type_managers
@@ -314,7 +321,58 @@ class _BeamKVCacheManager:
     ) -> Any:
         if self._fits_existing_beam_pages(request, num_new_tokens, kwargs):
             return self._manager.empty_kv_cache_blocks
+        remaining = (
+            self._remaining_siblings(request)
+            if self._remaining_siblings is not None
+            else 0
+        )
+        if remaining:
+            reserved_blocks = (
+                self._num_blocks_to_allocate(request, num_new_tokens, kwargs)
+                * remaining
+            )
+            if reserved_blocks:
+                kwargs = dict(kwargs)
+                kwargs["reserved_blocks"] = (
+                    kwargs.get("reserved_blocks", 0) + reserved_blocks
+                )
         return self._manager.allocate_slots(request, num_new_tokens, **kwargs)
+
+    def _num_blocks_to_allocate(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        kwargs: dict[str, Any],
+    ) -> int:
+        new_computed = kwargs.get("new_computed_blocks")
+        if new_computed is None:
+            new_computed_blocks = self._manager.empty_kv_cache_blocks.blocks
+        else:
+            new_computed_blocks = new_computed.blocks
+
+        num_new_computed_tokens = kwargs.get("num_new_computed_tokens", 0)
+        num_external_computed_tokens = kwargs.get("num_external_computed_tokens", 0)
+        num_local_computed_tokens = (
+            request.num_computed_tokens + num_new_computed_tokens
+        )
+        total_computed_tokens = min(
+            num_local_computed_tokens + num_external_computed_tokens,
+            self._manager.max_model_len,
+        )
+        num_tokens_main_model = total_computed_tokens + num_new_tokens
+        num_tokens_need_slot = min(
+            num_tokens_main_model + kwargs.get("num_lookahead_tokens", 0),
+            self._manager.max_model_len,
+        )
+        return self._manager.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=num_tokens_need_slot,
+            new_computed_blocks=new_computed_blocks,
+            num_encoder_tokens=kwargs.get("num_encoder_tokens", 0),
+            total_computed_tokens=total_computed_tokens,
+            num_local_computed_tokens=num_local_computed_tokens,
+            num_tokens_main_model=num_tokens_main_model,
+        )
 
     def _fits_existing_beam_pages(
         self,
@@ -367,6 +425,18 @@ class BeamSearchScheduler(AsyncScheduler):
         log_stats: bool = False,
         **kwargs: Any,
     ) -> None:
+        required_hooks = (
+            "_get_num_required_running_slots",
+            "_get_request_token_budget",
+        )
+        missing_hooks = [
+            name for name in required_hooks if not hasattr(Scheduler, name)
+        ]
+        if missing_hooks:
+            raise RuntimeError(
+                "BeamSearchScheduler requires vLLM scheduler budget hooks: "
+                + ", ".join(missing_hooks)
+            )
         if mm_registry is None:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -391,11 +461,15 @@ class BeamSearchScheduler(AsyncScheduler):
 
         self.beam_groups: dict[str, BeamGroup] = {}
         self.beam_to_group: dict[str, str] = {}
+        self._beam_token_admissions: dict[str, bool] = {}
 
         # Indices of the decoder (self-attention) KV managers — everything
         # that is not cross-attention. Computed lazily on first use.
         self._self_attn_mgr_idxs: list[int] | None = None
-        self.kv_cache_manager = _BeamKVCacheManager(self.kv_cache_manager)
+        self.kv_cache_manager = _BeamKVCacheManager(
+            self.kv_cache_manager,
+            self._remaining_kv_siblings,
+        )
 
     def _update_request_with_output(
         self,
@@ -420,14 +494,20 @@ class BeamSearchScheduler(AsyncScheduler):
         if sp is None or sp.extra_args is None:
             return None
         bw = sp.extra_args.get("beam_width")
-        if bw is None:
+        if type(bw) is not int:
             return None
-        bw = int(bw)
         return bw if bw > 1 else None
 
     def add_request(self, request: Request) -> None:
         beam_width = self._get_beam_width(request)
         if beam_width is None:
+            super().add_request(request)
+            return
+
+        try:
+            validate_beam_xargs(request.sampling_params.extra_args)
+        except VLLMValidationError as error:
+            logger.error("Ignoring invalid beam search arguments: %s", error)
             super().add_request(request)
             return
 
@@ -452,6 +532,70 @@ class BeamSearchScheduler(AsyncScheduler):
             group.beam_requests.append(child)
             self.beam_to_group[child.request_id] = request.request_id
             super().add_request(child)
+
+    def _get_num_required_running_slots(self, request: Request) -> int:
+        group = self._beam_group_for_request(request)
+        if group is None:
+            return super()._get_num_required_running_slots(request)
+        return max(
+            1,
+            sum(child.status != RequestStatus.RUNNING for child in group.beam_requests),
+        )
+
+    def _get_request_token_budget(
+        self,
+        request: Request,
+        token_budget: int,
+        input_budget: int,
+    ) -> int:
+        available = super()._get_request_token_budget(
+            request,
+            token_budget,
+            input_budget,
+        )
+        group = self._beam_group_for_request(request)
+        if group is None:
+            return available
+
+        admitted = self._beam_token_admissions.get(group.orig_request_id)
+        if admitted is None:
+            required = sum(
+                self._request_token_demand(child)
+                for child in group.beam_requests
+                if child.request_id in self.requests
+            )
+            admitted = required <= available
+            self._beam_token_admissions[group.orig_request_id] = admitted
+        return available if admitted else 0
+
+    def _request_token_demand(self, request: Request) -> int:
+        if request.status == RequestStatus.RUNNING:
+            demand = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
+            )
+        else:
+            demand = request.num_tokens - request.num_computed_tokens
+
+        threshold = self.scheduler_config.long_prefill_token_threshold
+        if 0 < threshold < demand:
+            demand = threshold
+        return max(demand, 0)
+
+    def _beam_group_for_request(self, request: Request) -> BeamGroup | None:
+        group_id = self.beam_to_group.get(request.request_id)
+        return self.beam_groups.get(group_id) if group_id is not None else None
+
+    def _remaining_kv_siblings(self, request: Request) -> int:
+        group = self._beam_group_for_request(request)
+        if group is None:
+            return 0
+        try:
+            slot = group.beam_request_ids.index(request.request_id)
+        except ValueError:
+            return 0
+        return group.beam_width - slot - 1
 
     def _make_beam_child(
         self, orig: Request, beam_index: int, beam_width: int
@@ -602,14 +746,15 @@ class BeamSearchScheduler(AsyncScheduler):
     # update_from_output
     # ------------------------------------------------------------------
 
-    def schedule(self, throttle_prefills: bool = False) -> "SchedulerOutput":
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        self._beam_token_admissions.clear()
         scheduler_output = super().schedule(throttle_prefills)
         self._clamp_async_beam_decode_chunks(scheduler_output)
         return scheduler_output
 
     def _clamp_async_beam_decode_chunks(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
     ) -> None:
         for req_id, scheduled in list(
             scheduler_output.num_scheduled_tokens.items()
@@ -620,9 +765,8 @@ class BeamSearchScheduler(AsyncScheduler):
             if request is None:
                 continue
 
-            # The initial decoder prompt is scheduled as a normal prefill
-            # chunk. Only clamp decode chunks, where beam search has selected
-            # exactly one next token for MRV2 to consume.
+            # Keep the async scheduler's bookkeeping, but expose one beam
+            # transition per child to the model runner.
             prev_computed = request.num_computed_tokens - scheduled
             if prev_computed < request.num_prompt_tokens:
                 continue
@@ -637,8 +781,8 @@ class BeamSearchScheduler(AsyncScheduler):
 
     def update_from_output(
         self,
-        scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         outputs = super().update_from_output(scheduler_output, model_runner_output)
 
@@ -701,7 +845,7 @@ class BeamSearchScheduler(AsyncScheduler):
 
     @staticmethod
     def _beam_transitions_from_output(
-        model_runner_output: "ModelRunnerOutput",
+        model_runner_output: ModelRunnerOutput,
     ) -> dict[str, BeamTransition]:
         custom_outputs = getattr(model_runner_output, "custom_outputs", None)
         if not custom_outputs:
@@ -962,7 +1106,10 @@ class BeamSearchScheduler(AsyncScheduler):
     ) -> None:
         best, finish_reason = self._select_final_beam(group, transition)
         if best is not None:
-            final_tokens = self._tokens_with_eos(group, best.tokens)
+            final_tokens = self._tokens_with_eos(
+                group,
+                self._cap_completion_tokens(group, best.tokens),
+            )
             self._emit_parent_output(group, outputs, final_tokens, finish_reason)
         else:
             logger.warning("Beam group %s finalized with no beams.",
@@ -1026,6 +1173,14 @@ class BeamSearchScheduler(AsyncScheduler):
         if hasattr(tokens, "tolist"):
             return tokens.tolist()
         return list(tokens)
+
+    @staticmethod
+    def _cap_completion_tokens(group: BeamGroup, tokens: list[int]) -> list[int]:
+        sampling_params = group.orig_request.sampling_params
+        max_tokens = sampling_params.max_tokens if sampling_params else None
+        if max_tokens is None:
+            return list(tokens)
+        return list(tokens[:max_tokens])
 
     @staticmethod
     def _tokens_with_eos(group: BeamGroup, tokens: list[int]) -> list[int]:
