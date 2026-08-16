@@ -1,9 +1,10 @@
 """BeamSearchScheduler — MRV2 async plugin doing in-flight beam search.
 
 Matches the HF / V0 algorithm. At `add_request` we materialize
-`beam_width` sibling Request objects (one per beam). Small scheduler budget
-hooks reserve sequence slots and require the aggregate token/KV demand to fit,
-so a beam group advances as one scheduling candidate. The MRV2 sampler makes
+`beam_width` sibling Request objects (one per beam). Plugin-local scheduler
+admission hooks reserve sequence slots and require the aggregate token/KV
+demand to fit, so a beam group advances as one scheduling candidate. The MRV2
+sampler makes
 per-step beam decisions and emits `BeamTransition` records; this scheduler
 reconciles the CPU-side request/KV bookkeeping when those async outputs arrive.
 
@@ -38,6 +39,7 @@ from vllm.v1.request import Request, RequestStatus
 
 from .beam_state import BeamGroup, CompletedBeam
 from .beam_types import BeamTransition
+from .scheduler_adapter import build_resource_atomic_schedule
 from .validation import validate_beam_xargs
 
 _BEAM_TRANSITIONS_OUTPUT = "vllm_beam_search.transitions"
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
+_RESOURCE_ATOMIC_SCHEDULE = build_resource_atomic_schedule()
 
 
 def _install_worker_history_rewrite_hooks() -> None:
@@ -425,18 +428,6 @@ class BeamSearchScheduler(AsyncScheduler):
         log_stats: bool = False,
         **kwargs: Any,
     ) -> None:
-        required_hooks = (
-            "_get_num_required_running_slots",
-            "_get_request_token_budget",
-        )
-        missing_hooks = [
-            name for name in required_hooks if not hasattr(Scheduler, name)
-        ]
-        if missing_hooks:
-            raise RuntimeError(
-                "BeamSearchScheduler requires vLLM scheduler budget hooks: "
-                + ", ".join(missing_hooks)
-            )
         if mm_registry is None:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -536,7 +527,10 @@ class BeamSearchScheduler(AsyncScheduler):
     def _get_num_required_running_slots(self, request: Request) -> int:
         group = self._beam_group_for_request(request)
         if group is None:
-            return super()._get_num_required_running_slots(request)
+            base_hook = getattr(
+                super(), "_get_num_required_running_slots", None
+            )
+            return base_hook(request) if base_hook is not None else 1
         return max(
             1,
             sum(child.status != RequestStatus.RUNNING for child in group.beam_requests),
@@ -548,10 +542,11 @@ class BeamSearchScheduler(AsyncScheduler):
         token_budget: int,
         input_budget: int,
     ) -> int:
-        available = super()._get_request_token_budget(
-            request,
-            token_budget,
-            input_budget,
+        base_hook = getattr(super(), "_get_request_token_budget", None)
+        available = (
+            base_hook(request, token_budget, input_budget)
+            if base_hook is not None
+            else min(token_budget, input_budget)
         )
         group = self._beam_group_for_request(request)
         if group is None:
@@ -748,7 +743,7 @@ class BeamSearchScheduler(AsyncScheduler):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self._beam_token_admissions.clear()
-        scheduler_output = super().schedule(throttle_prefills)
+        scheduler_output = _RESOURCE_ATOMIC_SCHEDULE(self, throttle_prefills)
         self._clamp_async_beam_decode_chunks(scheduler_output)
         return scheduler_output
 

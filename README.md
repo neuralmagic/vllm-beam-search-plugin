@@ -5,6 +5,7 @@ MRV2 beam-search scheduler and sampler plugin for vLLM V1.
 This package provides:
 
 - `vllm_beam_search.scheduler.BeamSearchScheduler`
+- plugin-local sequence, token, and KV admission for complete beam groups
 - an MRV2 custom sampler wrapper installed through a plugin-local `ModelState`
   hook
 - plugin-local runtime hooks for MRV2 worker history rewrites
@@ -12,6 +13,11 @@ This package provides:
 The current production path targets MRV2 generate models with async scheduling.
 The sampler hook is model-state generic; BART-family models still need the
 companion `vllm-bart-plugin` for encoder-decoder model support.
+
+The plugin does not require a vLLM fork or source patch. It derives a private
+Beam scheduler method from the installed vLLM scheduler and adds only the group
+admission checks. Startup fails closed if those scheduler sites are not
+compatible with the installed vLLM version.
 
 For BART-family encoder-decoder serving, see
 [`BART_BEAM_SEARCH.md`](BART_BEAM_SEARCH.md).

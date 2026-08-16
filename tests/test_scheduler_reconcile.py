@@ -6,10 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 from vllm.exceptions import VLLMValidationError
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
 
 from vllm_beam_search.beam_state import BeamGroup
-from vllm_beam_search.scheduler import BeamSearchScheduler, _BeamKVCacheManager
+from vllm_beam_search.scheduler import (
+    _RESOURCE_ATOMIC_SCHEDULE,
+    BeamSearchScheduler,
+    _BeamKVCacheManager,
+)
+from vllm_beam_search.scheduler_adapter import patch_scheduler_source
 from vllm_beam_search.validation import validate_beam_xargs
 
 
@@ -153,6 +159,20 @@ def test_single_request_keeps_normal_budget_cost() -> None:
 
     assert scheduler._get_num_required_running_slots(request) == 1
     assert scheduler._get_request_token_budget(request, 7, 5) == 5
+
+
+def test_scheduler_admission_hooks_are_installed_out_of_tree() -> None:
+    hook_names = _RESOURCE_ATOMIC_SCHEDULE.__code__.co_names
+
+    assert "_get_num_required_running_slots" in hook_names
+    assert "_get_request_token_budget" in hook_names
+    if not hasattr(Scheduler, "_get_request_token_budget"):
+        assert _RESOURCE_ATOMIC_SCHEDULE is not Scheduler.schedule
+
+
+def test_scheduler_patch_fails_closed_on_unknown_vllm_shape() -> None:
+    with pytest.raises(RuntimeError, match="running token-budget"):
+        patch_scheduler_source("def schedule(self): pass")
 
 
 def test_beam_completion_is_capped_at_public_max_tokens() -> None:
