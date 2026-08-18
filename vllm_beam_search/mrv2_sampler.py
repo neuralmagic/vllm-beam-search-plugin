@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import inspect
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 import triton
 import triton.language as tl
-
 from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
@@ -1017,6 +1017,10 @@ class BeamSearchMRV2Sampler:
         self._gpu_group_state: dict[str, _BeamGroupGpuState] = {}
         self._gpu_state_pools: dict[int, _BeamGroupStatePool] = {}
         self._transition_buffer_pool = _TransitionBufferPool()
+        self._sampling_params_accepts_idx_mapping = (
+            "idx_mapping"
+            in inspect.signature(base_sampler.apply_sampling_params).parameters
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.base_sampler, name)
@@ -1142,16 +1146,18 @@ class BeamSearchMRV2Sampler:
 
         num_nans = get_num_nans(logits) if sampler.compute_nans else None
 
-        processed_logits = sampler.apply_sampling_params(
-            logits,
-            expanded_idx_mapping,
-            input_batch.idx_mapping,
-            idx_mapping_np,
-            pos,
-            input_ids,
-            expanded_local_pos,
-            skip_top_k_top_p=True,
-        )
+        sampling_kwargs = {
+            "logits": logits,
+            "expanded_idx_mapping": expanded_idx_mapping,
+            "idx_mapping_np": idx_mapping_np,
+            "pos": pos,
+            "input_ids": input_ids,
+            "expanded_local_pos": expanded_local_pos,
+            "skip_top_k_top_p": True,
+        }
+        if self._sampling_params_accepts_idx_mapping:
+            sampling_kwargs["idx_mapping"] = input_batch.idx_mapping
+        processed_logits = sampler.apply_sampling_params(**sampling_kwargs)
 
         return self._sample_with_gpu_beam_select(
             processed_logits,

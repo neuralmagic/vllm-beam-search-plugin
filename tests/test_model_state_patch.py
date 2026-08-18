@@ -4,6 +4,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from vllm_beam_search.mrv2_sampler import BeamSearchMRV2Sampler
 from vllm_beam_search.scheduler import _attach_beam_sampler_to_model_state
 
 
@@ -117,3 +118,40 @@ def test_default_scheduler_does_not_wrap_model_state():
     )
 
     assert not hasattr(model_state, "_vllm_beam_sampler_patched")
+
+
+class _LegacySampler:
+    def apply_sampling_params(
+        self,
+        logits,
+        expanded_idx_mapping,
+        idx_mapping_np,
+        pos,
+        input_ids,
+        expanded_local_pos,
+        skip_top_k_top_p=False,
+    ):
+        return logits
+
+
+class _ModernSampler(_LegacySampler):
+    def apply_sampling_params(
+        self,
+        logits,
+        expanded_idx_mapping,
+        idx_mapping,
+        idx_mapping_np,
+        pos,
+        input_ids,
+        expanded_local_pos,
+        skip_top_k_top_p=False,
+    ):
+        return logits
+
+
+def test_beam_sampler_detects_legacy_sampling_signature():
+    legacy = BeamSearchMRV2Sampler(_LegacySampler(), None, None)
+    modern = BeamSearchMRV2Sampler(_ModernSampler(), None, None)
+
+    assert not legacy._sampling_params_accepts_idx_mapping
+    assert modern._sampling_params_accepts_idx_mapping

@@ -45,4 +45,4 @@ beam_search = "vllm_beam_search:register_beam_search_plugin"
 packages = ["vllm_beam_search"]
 
 [tool.setuptools.package-data]
-vllm_beam_search = ["py.typed"]
+vllm_beam_search = ["py.typed", "*.diff"]

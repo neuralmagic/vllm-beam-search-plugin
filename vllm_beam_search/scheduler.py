@@ -25,6 +25,7 @@ Per step (`update_from_output`):
 from __future__ import annotations
 
 import copy
+import inspect
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -50,6 +51,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 _RESOURCE_ATOMIC_SCHEDULE = build_resource_atomic_schedule()
+_ASYNC_UPDATE_SUPPORTS_STALE = (
+    "is_stale"
+    in inspect.signature(AsyncScheduler._update_request_with_output).parameters
+)
 
 
 def _install_worker_history_rewrite_hooks() -> None:
@@ -312,6 +317,11 @@ class _BeamKVCacheManager:
             for single_type_manager in manager.coordinator.single_type_managers
             if not isinstance(single_type_manager, CrossAttentionManager)
         )
+        block_counter = manager.coordinator.get_num_blocks_to_allocate
+        self._block_counter_accepts_local_tokens = (
+            "num_local_computed_tokens"
+            in inspect.signature(block_counter).parameters
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._manager, name)
@@ -367,14 +377,20 @@ class _BeamKVCacheManager:
             num_tokens_main_model + kwargs.get("num_lookahead_tokens", 0),
             self._manager.max_model_len,
         )
+        block_count_kwargs = {
+            "request_id": request.request_id,
+            "num_tokens": num_tokens_need_slot,
+            "new_computed_blocks": new_computed_blocks,
+            "num_encoder_tokens": kwargs.get("num_encoder_tokens", 0),
+            "total_computed_tokens": total_computed_tokens,
+            "num_tokens_main_model": num_tokens_main_model,
+        }
+        if self._block_counter_accepts_local_tokens:
+            block_count_kwargs["num_local_computed_tokens"] = (
+                num_local_computed_tokens
+            )
         return self._manager.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
-            num_tokens=num_tokens_need_slot,
-            new_computed_blocks=new_computed_blocks,
-            num_encoder_tokens=kwargs.get("num_encoder_tokens", 0),
-            total_computed_tokens=total_computed_tokens,
-            num_local_computed_tokens=num_local_computed_tokens,
-            num_tokens_main_model=num_tokens_main_model,
+            **block_count_kwargs
         )
 
     def _fits_existing_beam_pages(
@@ -468,9 +484,17 @@ class BeamSearchScheduler(AsyncScheduler):
         new_token_ids: list[int],
         is_stale: bool = False,
     ) -> tuple[list[int], bool]:
-        new_token_ids, stopped = super()._update_request_with_output(
-            request, new_token_ids, is_stale
-        )
+        if _ASYNC_UPDATE_SUPPORTS_STALE:
+            new_token_ids, stopped = super()._update_request_with_output(
+                request,
+                new_token_ids,
+                is_stale,
+            )
+        else:
+            new_token_ids, stopped = super()._update_request_with_output(
+                request,
+                new_token_ids,
+            )
         if request.request_id in self.beam_to_group and not stopped:
             return [], False
         return new_token_ids, stopped

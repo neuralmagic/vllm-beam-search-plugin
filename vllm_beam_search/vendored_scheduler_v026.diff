@@ -1,0 +1,21 @@
+--- upstream/Scheduler.schedule
++++ vendored/Scheduler.schedule
+@@ -85 +85,4 @@
+-        num_new_tokens = min(num_new_tokens, token_budget)
++        request_token_budget = self._get_request_token_budget(
++            request, token_budget, token_budget
++        )
++        num_new_tokens = min(num_new_tokens, request_token_budget)
+@@ -256,0 +260,4 @@
++
++            required_slots = self._get_num_required_running_slots(request)
++            if num_running + required_slots > self.max_num_running_reqs:
++                break
+@@ -451 +458,6 @@
+-                num_new_tokens = min(num_new_tokens, token_budget)
++                request_token_budget = self._get_request_token_budget(
++                    request, token_budget, token_budget
++                )
++                if request_token_budget == 0:
++                    break
++                num_new_tokens = min(num_new_tokens, request_token_budget)

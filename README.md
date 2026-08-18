@@ -14,10 +14,11 @@ The current production path targets MRV2 generate models with async scheduling.
 The sampler hook is model-state generic; BART-family models still need the
 companion `vllm-bart-plugin` for encoder-decoder model support.
 
-The plugin does not require a vLLM fork or source patch. It derives a private
-Beam scheduler method from the installed vLLM scheduler and adds only the group
-admission checks. Startup fails closed if those scheduler sites are not
-compatible with the installed vLLM version.
+The plugin does not require a vLLM fork or source patch. It carries explicit
+plugin-local scheduler implementations for vLLM 0.24.0, 0.26.0, and the tested
+0.26.1 development build. Startup fails closed on an unsupported scheduler.
+Each vendored scheduler has an adjacent `.diff` recording its exact changes
+from the hashed upstream `Scheduler.schedule`; the test suite verifies both.
 
 For BART-family encoder-decoder serving, see
 [`BART_BEAM_SEARCH.md`](BART_BEAM_SEARCH.md).
@@ -25,6 +26,7 @@ For BART-family encoder-decoder serving, see
 ## Install
 
 ```bash
+uv pip install 'vllm==0.26.0'
 uv pip install -e .
 ```
 
@@ -42,12 +44,12 @@ SERVED_MODEL=${SERVED_MODEL:-llama3-8b}
 
 CUDA_VISIBLE_DEVICES=0 \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
-python -m vllm.entrypoints.openai.api_server \
-  --model "${MODEL}" \
+vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype bfloat16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
+  --async-scheduling
 ```
 
 ## Request Shape

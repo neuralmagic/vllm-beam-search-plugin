@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import difflib
+import hashlib
+import inspect
+import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib import import_module, resources
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +20,7 @@ from vllm_beam_search.scheduler import (
     BeamSearchScheduler,
     _BeamKVCacheManager,
 )
-from vllm_beam_search.scheduler_adapter import patch_scheduler_source
+from vllm_beam_search.scheduler_adapter import _select_vendored_schedule
 from vllm_beam_search.validation import validate_beam_xargs
 
 
@@ -61,6 +66,24 @@ class FakeKVCacheManager:
         self.allocate_calls += 1
         self.last_allocate_kwargs = kwargs
         return object()
+
+
+class LegacyCoordinator:
+    def __init__(self, manager: object) -> None:
+        self.single_type_managers = [manager]
+        self.calls = 0
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id,
+        num_tokens,
+        new_computed_blocks,
+        num_encoder_tokens,
+        total_computed_tokens,
+        num_tokens_main_model,
+    ) -> int:
+        self.calls += 1
+        return 2
 
 
 def make_beam_request(num_computed_tokens: int):
@@ -170,9 +193,62 @@ def test_scheduler_admission_hooks_are_installed_out_of_tree() -> None:
         assert _RESOURCE_ATOMIC_SCHEDULE is not Scheduler.schedule
 
 
-def test_scheduler_patch_fails_closed_on_unknown_vllm_shape() -> None:
-    with pytest.raises(RuntimeError, match="running token-budget"):
-        patch_scheduler_source("def schedule(self): pass")
+def test_vendored_scheduler_diff_matches_record() -> None:
+    if _RESOURCE_ATOMIC_SCHEDULE is Scheduler.schedule:
+        pytest.skip("vLLM provides native Beam admission hooks")
+
+    upstream_source = inspect.getsource(Scheduler.schedule)
+    vendored_source = inspect.getsource(_RESOURCE_ATOMIC_SCHEDULE).replace(
+        f"def {_RESOURCE_ATOMIC_SCHEDULE.__name__}(",
+        "def schedule(",
+        1,
+    )
+    module = import_module(_RESOURCE_ATOMIC_SCHEDULE.__module__)
+
+    assert hashlib.sha256(upstream_source.encode()).hexdigest() == (
+        module.UPSTREAM_SCHEDULE_SHA256
+    )
+
+    actual_diff = "".join(
+        difflib.unified_diff(
+            textwrap.dedent(upstream_source).splitlines(keepends=True),
+            vendored_source.splitlines(keepends=True),
+            fromfile="upstream/Scheduler.schedule",
+            tofile="vendored/Scheduler.schedule",
+            n=0,
+        )
+    )
+    diff_name = f"{module.__name__.rsplit('.', 1)[-1]}.diff"
+    recorded_diff = resources.files("vllm_beam_search").joinpath(diff_name).read_text()
+
+    assert actual_diff == recorded_diff
+
+
+@pytest.mark.parametrize(
+    ("version", "scheduler_locals", "expected_name"),
+    [
+        ("0.24.0", (), "schedule_v024"),
+        ("0.26.0", ("num_running",), "schedule_v026"),
+        (
+            "0.26.1rc1.dev682+g7aa248fcf",
+            ("num_running", "input_budget"),
+            "schedule_v0261",
+        ),
+    ],
+)
+def test_scheduler_selects_explicit_vllm_implementation(
+    version: str,
+    scheduler_locals: tuple[str, ...],
+    expected_name: str,
+) -> None:
+    _module_name, function_name = _select_vendored_schedule(version, scheduler_locals)
+
+    assert function_name == expected_name
+
+
+def test_scheduler_selection_fails_closed_on_unknown_vllm() -> None:
+    with pytest.raises(RuntimeError, match="unsupported scheduler"):
+        _select_vendored_schedule("0.27.0", ("input_budget",))
 
 
 def test_beam_completion_is_capped_at_public_max_tokens() -> None:
@@ -243,6 +319,18 @@ def test_beam_kv_manager_reserves_blocks_for_remaining_siblings() -> None:
 
     beam_manager.allocate_slots(make_beam_request(14), 3)
 
+    assert manager.last_allocate_kwargs["reserved_blocks"] == 6
+
+
+def test_beam_kv_manager_supports_legacy_block_counter_signature() -> None:
+    manager = FakeKVCacheManager()
+    coordinator = LegacyCoordinator(manager.single_type_manager)
+    manager.coordinator = coordinator
+    beam_manager = _BeamKVCacheManager(manager, lambda _request: 3)
+
+    beam_manager.allocate_slots(make_beam_request(14), 3)
+
+    assert coordinator.calls == 1
     assert manager.last_allocate_kwargs["reserved_blocks"] == 6
 
 

@@ -11,6 +11,8 @@ scheduler. It requires both plugins in the same vLLM environment:
 Install vLLM first, then install both plugins into that environment:
 
 ```bash
+uv pip install 'vllm==0.26.0'
+
 cd <bart-plugin-checkout>
 uv pip install -e .
 
@@ -25,11 +27,10 @@ plugin loading with `VLLM_PLUGINS`, include both plugin entry points:
 export VLLM_PLUGINS=bart,beam_search
 ```
 
-## One-Shot Nightly
+## One-Shot Environment
 
-To try the latest vLLM nightly without installing into the current environment,
-run the server with both plugin checkouts installed into an isolated `uv run`
-environment:
+To run the supported vLLM 0.26.0 build without installing into the current
+environment, use an isolated `uv run` environment:
 
 ```bash
 BART_PLUGIN=${BART_PLUGIN:-<bart-plugin-checkout>}
@@ -42,18 +43,16 @@ VLLM_PLUGINS=bart,beam_search \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
 UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
-  --with vllm \
+  --with 'vllm==0.26.0' \
   --with 'tokenizers==0.22.1' \
   --with-editable "${BART_PLUGIN}" \
   --with-editable "${BEAM_PLUGIN}" \
-  --extra-index-url https://wheels.vllm.ai/nightly \
-  --prerelease allow \
-  -m vllm.entrypoints.openai.api_server \
-  --model "${MODEL}" \
+  vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
+  --async-scheduling
 ```
 
 For pinned GitHub refs, use `--with` instead of `--with-editable`.
@@ -73,18 +72,16 @@ VLLM_PLUGINS=bart,beam_search \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
 UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
-  --with vllm \
+  --with 'vllm==0.26.0' \
   --with 'tokenizers==0.22.1' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
   --with "vllm-beam-search @ git+https://github.com/neuralmagic/vllm-beamsearch-plugin.git@${BEAM_PLUGIN_REF}" \
-  --extra-index-url https://wheels.vllm.ai/nightly \
-  --prerelease allow \
-  -m vllm.entrypoints.openai.api_server \
-  --model "${MODEL}" \
+  vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
+  --async-scheduling
 ```
 
 ## Start Server
@@ -95,12 +92,12 @@ SERVED_MODEL=${SERVED_MODEL:-bart}
 
 CUDA_VISIBLE_DEVICES=0 \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
-python -m vllm.entrypoints.openai.api_server \
-  --model "${MODEL}" \
+vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
+  --async-scheduling
 ```
 
 Notes:
