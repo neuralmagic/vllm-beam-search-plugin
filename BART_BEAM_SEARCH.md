@@ -51,19 +51,15 @@ uv run --isolated --python 3.12 \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
-  --async-scheduling
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
 ```
 
-For pinned GitHub refs, use `--with` instead of `--with-editable`.
-Editable installs require a local checkout; Git refs are installed as normal
-package sources. These defaults use the beam-search plugin `main` branch and
-the BART plugin MRV2 cleanup branch; replace either ref with a commit hash for
-an immutable pin:
+For published or pinned GitHub releases, use `--with` instead of
+`--with-editable`. Editable installs require a local checkout; release sources
+are installed as normal packages:
 
 ```bash
-BART_PLUGIN_REF=${BART_PLUGIN_REF:-codex/bart-mrv2-plugin-cleanup}
-BEAM_PLUGIN_REF=${BEAM_PLUGIN_REF:-main}
+BART_PLUGIN_REF=${BART_PLUGIN_REF:-v0.6.0}
 MODEL=${MODEL:-facebook/bart-large-cnn}
 SERVED_MODEL=${SERVED_MODEL:-bart}
 
@@ -75,13 +71,12 @@ uv run --isolated --python 3.12 \
   --with 'vllm==0.26.0' \
   --with 'tokenizers==0.22.1' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
-  --with "vllm-beam-search-plugin @ git+https://github.com/neuralmagic/vllm-beam-search-plugin.git@${BEAM_PLUGIN_REF}" \
+  --with 'vllm-beam-search-plugin==0.1.1' \
   vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
-  --async-scheduling
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
 ```
 
 ## Start Server
@@ -96,8 +91,7 @@ vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
-  --async-scheduling
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
 ```
 
 Notes:

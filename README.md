@@ -28,12 +28,10 @@ For BART-family encoder-decoder serving, see
 
 ## Install
 
-The distribution is currently installed from Git rather than PyPI. Pin the Git
-reference in reproducible builds:
+Install the published distribution from PyPI with an exact version pin:
 
 ```bash
-uv pip install \
-  'vllm-beam-search-plugin @ git+https://github.com/neuralmagic/vllm-beam-search-plugin.git@v0.1.0'
+uv pip install 'vllm-beam-search-plugin==0.1.1'
 ```
 
 The plugin metadata constrains its tested NumPy, PyTorch, and Triton API ranges.
@@ -43,7 +41,7 @@ plugin:
 
 ```bash
 uv pip install --no-deps \
-  'vllm-beam-search-plugin @ git+https://github.com/neuralmagic/vllm-beam-search-plugin.git@v0.1.0'
+  'vllm-beam-search-plugin==0.1.1'
 ```
 
 The vLLM 0.24.0 path has been unit-, correctness-, concurrency-, and sustained
@@ -53,7 +51,7 @@ does not use `inspect.getsource`, source-text matching, or runtime `exec`.
 For stress tooling:
 
 ```bash
-uv pip install -e '.[stress]'
+uv pip install 'vllm-beam-search-plugin[stress]==0.1.1'
 ```
 
 ## Server
@@ -68,8 +66,7 @@ vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype bfloat16 \
   --port 8005 \
-  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler \
-  --async-scheduling
+  --scheduler-cls vllm_beam_search.scheduler.BeamSearchScheduler
 ```
 
 ## Request Shape
