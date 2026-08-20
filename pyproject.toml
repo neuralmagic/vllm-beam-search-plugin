@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm-beam-search"
+name = "vllm-beam-search-plugin"
 version = "0.1.0"
 description = "Beam search plugin for vLLM v1 with CoW block table forking"
 readme = "README.md"
@@ -20,10 +20,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "vllm",
-    "numpy",
-    "torch",
-    "triton",
+    "vllm>=0.24.0,<0.27.0",
+    "numpy>=2.0,<3.0",
+    "torch>=2.11,<2.14",
+    "triton>=3.6,<3.8",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +34,10 @@ dev = [
 stress = [
     "httpx",
 ]
+
+[project.urls]
+Repository = "https://github.com/neuralmagic/vllm-beam-search-plugin"
+Issues = "https://github.com/neuralmagic/vllm-beam-search-plugin/issues"
 
 [project.scripts]
 vllm-beam-stress = "vllm_beam_search.stress_server:main_sync"

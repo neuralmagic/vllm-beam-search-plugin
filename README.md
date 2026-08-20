@@ -20,15 +20,35 @@ plugin-local scheduler implementations for vLLM 0.24.0, 0.26.0, and the tested
 Each vendored scheduler has an adjacent `.diff` recording its exact changes
 from the hashed upstream `Scheduler.schedule`; the test suite verifies both.
 
+The Git repository, installable Python distribution, and PyPI project are named
+`vllm-beam-search-plugin`; the import package is `vllm_beam_search`.
+
 For BART-family encoder-decoder serving, see
 [`BART_BEAM_SEARCH.md`](BART_BEAM_SEARCH.md).
 
 ## Install
 
+The distribution is currently installed from Git rather than PyPI. Pin the Git
+reference in reproducible builds:
+
 ```bash
-uv pip install 'vllm==0.26.0'
-uv pip install -e .
+uv pip install \
+  'vllm-beam-search-plugin @ git+https://github.com/neuralmagic/vllm-beam-search-plugin.git@v0.1.0'
 ```
+
+The plugin metadata constrains its tested NumPy, PyTorch, and Triton API ranges.
+vLLM remains the owner of their accelerator-specific builds. In a prebuilt
+RHAII 3.5 image, preserve the image runtime and install only the pure-Python
+plugin:
+
+```bash
+uv pip install --no-deps \
+  'vllm-beam-search-plugin @ git+https://github.com/neuralmagic/vllm-beam-search-plugin.git@v0.1.0'
+```
+
+The vLLM 0.24.0 path has been unit-, correctness-, concurrency-, and sustained
+memory-tested. It selects `vendored_scheduler_v024.schedule_v024` directly; it
+does not use `inspect.getsource`, source-text matching, or runtime `exec`.
 
 For stress tooling:
 
@@ -73,7 +93,7 @@ vllm serve "${MODEL}" \
 Run unit tests:
 
 ```bash
-python -m pytest tests -q
+uv run --with pytest python -m pytest tests -q
 ```
 
 Run sustained stress plus memory sampling against a running server:

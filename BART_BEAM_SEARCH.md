@@ -4,7 +4,7 @@ This guide runs BART-family encoder-decoder models with the beam-search
 scheduler. It requires both plugins in the same vLLM environment:
 
 - `vllm-bart-plugin` for BART model and prompt support
-- `vllm-beam-search` for the MRV2 beam scheduler and sampler
+- `vllm-beam-search-plugin` for the MRV2 beam scheduler and sampler
 
 ## Install
 
@@ -16,7 +16,7 @@ uv pip install 'vllm==0.26.0'
 cd <bart-plugin-checkout>
 uv pip install -e .
 
-cd <vllm-beamsearch-plugin-checkout>
+cd <vllm-beam-search-plugin-checkout>
 uv pip install -e '.[stress]'
 ```
 
@@ -34,7 +34,7 @@ environment, use an isolated `uv run` environment:
 
 ```bash
 BART_PLUGIN=${BART_PLUGIN:-<bart-plugin-checkout>}
-BEAM_PLUGIN=${BEAM_PLUGIN:-<vllm-beamsearch-plugin-checkout>}
+BEAM_PLUGIN=${BEAM_PLUGIN:-<vllm-beam-search-plugin-checkout>}
 MODEL=${MODEL:-facebook/bart-large-cnn}
 SERVED_MODEL=${SERVED_MODEL:-bart}
 
@@ -75,7 +75,7 @@ uv run --isolated --python 3.12 \
   --with 'vllm==0.26.0' \
   --with 'tokenizers==0.22.1' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
-  --with "vllm-beam-search @ git+https://github.com/neuralmagic/vllm-beamsearch-plugin.git@${BEAM_PLUGIN_REF}" \
+  --with "vllm-beam-search-plugin @ git+https://github.com/neuralmagic/vllm-beam-search-plugin.git@${BEAM_PLUGIN_REF}" \
   vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
