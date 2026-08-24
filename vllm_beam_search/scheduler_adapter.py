@@ -11,22 +11,23 @@ from vllm.v1.core.sched.scheduler import Scheduler
 
 
 def _select_vendored_schedule(
-    version: str,
+    version_tuple: tuple[int | str, ...],
     scheduler_locals: tuple[str, ...],
 ) -> tuple[str, str]:
     has_input_budget = "input_budget" in scheduler_locals
     has_num_running = "num_running" in scheduler_locals
+    release = version_tuple[:3]
 
-    if version == "0.24.0" and not has_num_running:
+    if release == (0, 24, 0) and not has_num_running:
         return ".vendored_scheduler_v024", "schedule_v024"
-    if version == "0.26.0" and has_num_running and not has_input_budget:
+    if release == (0, 26, 0) and has_num_running and not has_input_budget:
         return ".vendored_scheduler_v026", "schedule_v026"
-    if version == "0.26.1rc1.dev682+g7aa248fcf" and has_input_budget:
+    if has_input_budget and release == (0, 26, 1):
         return ".vendored_scheduler_v0261", "schedule_v0261"
 
     raise RuntimeError(
         "Installed vLLM scheduler is incompatible with the Beam plugin: "
-        f"unsupported scheduler for vLLM {version}."
+        f"unsupported scheduler for vLLM {vllm.__version__}."
     )
 
 
@@ -39,7 +40,7 @@ def build_resource_atomic_schedule() -> Callable[..., Any]:
         return Scheduler.schedule
 
     module_name, function_name = _select_vendored_schedule(
-        vllm.__version__,
+        vllm.__version_tuple__,
         Scheduler.schedule.__code__.co_varnames,
     )
     module = import_module(module_name, package=__package__)
