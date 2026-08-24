@@ -71,7 +71,7 @@ uv run --isolated --python 3.12 \
   --with 'vllm==0.26.0' \
   --with 'tokenizers==0.22.1' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
-  --with 'vllm-beam-search-plugin==0.1.1' \
+  --with 'vllm-beam-search-plugin==0.1.2' \
   vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
