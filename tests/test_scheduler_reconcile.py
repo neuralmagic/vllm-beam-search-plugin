@@ -229,8 +229,15 @@ def test_vendored_scheduler_diff_matches_record() -> None:
     [
         ("0.24.0", (), "schedule_v024"),
         ("0.26.0", ("num_running",), "schedule_v026"),
+        ("0.26.0+cu130", ("num_running",), "schedule_v026"),
+        ("0.26.0+rhaiv.3.cu130", ("num_running",), "schedule_v026"),
         (
             "0.26.1rc1.dev682+g7aa248fcf",
+            ("num_running", "input_budget"),
+            "schedule_v0261",
+        ),
+        (
+            "0.26.1rc1.dev682+g7aa248fcf.cu130",
             ("num_running", "input_budget"),
             "schedule_v0261",
         ),

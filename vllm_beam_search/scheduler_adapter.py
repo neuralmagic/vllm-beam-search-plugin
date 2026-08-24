@@ -7,7 +7,13 @@ from importlib import import_module
 from typing import Any
 
 import vllm
+from packaging.version import Version
 from vllm.v1.core.sched.scheduler import Scheduler
+
+
+def _vllm_release(version: str) -> tuple[int, ...]:
+    """Return the public (major, minor, patch) tuple, ignoring local suffixes."""
+    return Version(version).release
 
 
 def _select_vendored_schedule(
@@ -16,12 +22,13 @@ def _select_vendored_schedule(
 ) -> tuple[str, str]:
     has_input_budget = "input_budget" in scheduler_locals
     has_num_running = "num_running" in scheduler_locals
+    release = _vllm_release(version)
 
-    if version == "0.24.0" and not has_num_running:
+    if release == (0, 24, 0) and not has_num_running:
         return ".vendored_scheduler_v024", "schedule_v024"
-    if version == "0.26.0" and has_num_running and not has_input_budget:
+    if release == (0, 26, 0) and has_num_running and not has_input_budget:
         return ".vendored_scheduler_v026", "schedule_v026"
-    if version == "0.26.1rc1.dev682+g7aa248fcf" and has_input_budget:
+    if has_input_budget and release >= (0, 26, 1):
         return ".vendored_scheduler_v0261", "schedule_v0261"
 
     raise RuntimeError(
