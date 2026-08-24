@@ -225,37 +225,39 @@ def test_vendored_scheduler_diff_matches_record() -> None:
 
 
 @pytest.mark.parametrize(
-    ("version", "scheduler_locals", "expected_name"),
+    ("version_tuple", "scheduler_locals", "expected_name"),
     [
-        ("0.24.0", (), "schedule_v024"),
-        ("0.26.0", ("num_running",), "schedule_v026"),
-        ("0.26.0+cu130", ("num_running",), "schedule_v026"),
-        ("0.26.0+rhaiv.3.cu130", ("num_running",), "schedule_v026"),
+        ((0, 24, 0), (), "schedule_v024"),
+        ((0, 26, 0), ("num_running",), "schedule_v026"),
+        ((0, 26, 0, "cu130"), ("num_running",), "schedule_v026"),
+        ((0, 26, 0, "rhaiv", "3", "cu130"), ("num_running",), "schedule_v026"),
         (
-            "0.26.1rc1.dev682+g7aa248fcf",
+            (0, 26, 1, "rc1", "dev682"),
             ("num_running", "input_budget"),
             "schedule_v0261",
         ),
         (
-            "0.26.1rc1.dev682+g7aa248fcf.cu130",
+            (0, 26, 1, "rc1", "dev682", "cu130"),
             ("num_running", "input_budget"),
             "schedule_v0261",
         ),
     ],
 )
 def test_scheduler_selects_explicit_vllm_implementation(
-    version: str,
+    version_tuple: tuple[int | str, ...],
     scheduler_locals: tuple[str, ...],
     expected_name: str,
 ) -> None:
-    _module_name, function_name = _select_vendored_schedule(version, scheduler_locals)
+    _module_name, function_name = _select_vendored_schedule(
+        version_tuple, scheduler_locals
+    )
 
     assert function_name == expected_name
 
 
 def test_scheduler_selection_fails_closed_on_unknown_vllm() -> None:
     with pytest.raises(RuntimeError, match="unsupported scheduler"):
-        _select_vendored_schedule("0.27.0", ("input_budget",))
+        _select_vendored_schedule((0, 27, 0), ("input_budget",))
 
 
 def test_beam_completion_is_capped_at_public_max_tokens() -> None:
