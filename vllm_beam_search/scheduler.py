@@ -44,6 +44,7 @@ from .scheduler_adapter import build_resource_atomic_schedule
 from .validation import validate_beam_xargs
 
 _BEAM_TRANSITIONS_OUTPUT = "vllm_beam_search.transitions"
+_FinishedRequest = Request | tuple[str, int]
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -680,7 +681,7 @@ class BeamSearchScheduler(AsyncScheduler):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: RequestStatus,
-    ) -> list[Request]:
+    ) -> list[_FinishedRequest]:  # type: ignore[override]
         request_ids = self._normalize_finish_ids(request_ids)
         cleanup_groups, child_to_orig, expanded_ids = (
             self._expand_finish_request_ids(request_ids)
@@ -695,22 +696,39 @@ class BeamSearchScheduler(AsyncScheduler):
         # through the base scheduler, then remove all plugin-owned group state
         # so has_requests()/get_num_unfinished_requests() cannot stay true
         # forever after a client disconnect.
-        public_finished: dict[str, Request] = {}
-        kept: list[Request] = []
+        public_finished: dict[str, _FinishedRequest] = {}
+        kept: list[_FinishedRequest] = []
         for request in finished:
-            group_id = child_to_orig.get(request.request_id)
+            group_id = child_to_orig.get(self._finished_request_id(request))
             if group_id is None:
                 kept.append(request)
                 continue
             group = cleanup_groups.get(group_id)
             if group is not None:
-                public_finished[group.orig_request_id] = group.orig_request
+                public_finished[group.orig_request_id] = (
+                    self._public_finished_request(request, group)
+                )
 
         for group in cleanup_groups.values():
             self._cleanup_group(group)
 
         kept.extend(public_finished.values())
         return kept
+
+    @staticmethod
+    def _finished_request_id(request: _FinishedRequest) -> str:
+        if isinstance(request, tuple):
+            return request[0]
+        return request.request_id
+
+    @staticmethod
+    def _public_finished_request(
+        request: _FinishedRequest,
+        group: BeamGroup,
+    ) -> _FinishedRequest:
+        if isinstance(request, tuple):
+            return (group.orig_request_id, group.orig_request.client_index)
+        return group.orig_request
 
     @staticmethod
     def _normalize_finish_ids(
@@ -754,9 +772,11 @@ class BeamSearchScheduler(AsyncScheduler):
                 group = self.beam_groups.get(group_id)
                 if group is not None:
                     cleanup_groups[group_id] = group
+                    expanded_ids.extend(group.beam_request_ids)
                     child_to_orig.update({
                         child_id: group_id for child_id in group.beam_request_ids
                     })
+                    continue
             expanded_ids.append(request_id)
 
         return cleanup_groups, child_to_orig, expanded_ids
