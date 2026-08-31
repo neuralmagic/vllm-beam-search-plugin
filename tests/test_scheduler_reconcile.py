@@ -125,6 +125,18 @@ def make_budget_scheduler(status: RequestStatus = RequestStatus.WAITING):
     return scheduler, group
 
 
+def make_finish_scheduler():
+    scheduler = BeamSearchScheduler.__new__(BeamSearchScheduler)
+    original = SimpleNamespace(request_id="beam", client_index=7)
+    group = BeamGroup("beam", original, 2)
+    group.beam_request_ids = ["beam:0", "beam:1"]
+    scheduler.beam_groups = {group.orig_request_id: group}
+    scheduler.beam_to_group = {
+        child_id: group.orig_request_id for child_id in group.beam_request_ids
+    }
+    return scheduler, group
+
+
 def test_beam_group_reserves_all_sequence_slots_before_admission() -> None:
     scheduler, group = make_budget_scheduler()
 
@@ -182,6 +194,77 @@ def test_single_request_keeps_normal_budget_cost() -> None:
 
     assert scheduler._get_num_required_running_slots(request) == 1
     assert scheduler._get_request_token_budget(request, 7, 5) == 5
+
+
+def test_finish_requests_maps_v024_tuples_to_parent(monkeypatch) -> None:
+    scheduler, group = make_finish_scheduler()
+
+    def finish_requests(_self, request_ids, _finished_status):
+        assert request_ids == group.beam_request_ids
+        return [(request_id, 7) for request_id in request_ids]
+
+    monkeypatch.setattr(Scheduler, "finish_requests", finish_requests)
+
+    finished = scheduler.finish_requests(
+        group.orig_request_id, RequestStatus.FINISHED_ABORTED
+    )
+
+    assert finished == [(group.orig_request_id, 7)]
+    assert scheduler.beam_groups == {}
+    assert scheduler.beam_to_group == {}
+
+
+def test_finish_requests_maps_v026_requests_to_parent(monkeypatch) -> None:
+    scheduler, group = make_finish_scheduler()
+    children = [
+        SimpleNamespace(request_id=request_id) for request_id in group.beam_request_ids
+    ]
+
+    def finish_requests(_self, request_ids, _finished_status):
+        assert request_ids == group.beam_request_ids
+        return children
+
+    monkeypatch.setattr(Scheduler, "finish_requests", finish_requests)
+
+    finished = scheduler.finish_requests(
+        group.orig_request_id, RequestStatus.FINISHED_ABORTED
+    )
+
+    assert finished == [group.orig_request]
+    assert scheduler.beam_groups == {}
+    assert scheduler.beam_to_group == {}
+
+
+def test_finish_requests_preserves_non_beam_results(monkeypatch) -> None:
+    scheduler, _group = make_finish_scheduler()
+
+    def finish_requests(_self, request_ids, _finished_status):
+        assert request_ids == ["greedy"]
+        return [("greedy", 3)]
+
+    monkeypatch.setattr(Scheduler, "finish_requests", finish_requests)
+
+    finished = scheduler.finish_requests("greedy", RequestStatus.FINISHED_ABORTED)
+
+    assert finished == [("greedy", 3)]
+
+
+def test_finish_requests_treats_child_as_atomic_group(monkeypatch) -> None:
+    scheduler, group = make_finish_scheduler()
+
+    def finish_requests(_self, request_ids, _finished_status):
+        assert request_ids == group.beam_request_ids
+        return [(request_id, 7) for request_id in request_ids]
+
+    monkeypatch.setattr(Scheduler, "finish_requests", finish_requests)
+
+    finished = scheduler.finish_requests(
+        group.beam_request_ids[0], RequestStatus.FINISHED_ABORTED
+    )
+
+    assert finished == [(group.orig_request_id, 7)]
+    assert scheduler.beam_groups == {}
+    assert scheduler.beam_to_group == {}
 
 
 def test_scheduler_admission_hooks_are_installed_out_of_tree() -> None:
