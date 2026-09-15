@@ -11,7 +11,7 @@ scheduler. It requires both plugins in the same vLLM environment:
 Install vLLM first, then install both plugins into that environment:
 
 ```bash
-uv pip install 'vllm==0.26.0'
+uv pip install 'vllm==0.28.0'
 
 cd <bart-plugin-checkout>
 uv pip install -e .
@@ -29,7 +29,7 @@ export VLLM_PLUGINS=bart,beam_search
 
 ## One-Shot Environment
 
-To run the supported vLLM 0.26.0 build without installing into the current
+To run the supported vLLM 0.28.0 build without installing into the current
 environment, use an isolated `uv run` environment:
 
 ```bash
@@ -43,8 +43,7 @@ VLLM_PLUGINS=bart,beam_search \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
 UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
-  --with 'vllm==0.26.0' \
-  --with 'tokenizers==0.22.1' \
+  --with 'vllm==0.28.0' \
   --with-editable "${BART_PLUGIN}" \
   --with-editable "${BEAM_PLUGIN}" \
   vllm serve "${MODEL}" \
@@ -68,10 +67,9 @@ VLLM_PLUGINS=bart,beam_search \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
 UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
-  --with 'vllm==0.26.0' \
-  --with 'tokenizers==0.22.1' \
+  --with 'vllm==0.28.0' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
-  --with 'vllm-beam-search-plugin==0.1.3' \
+  --with 'vllm-beam-search-plugin==0.1.4' \
   vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
@@ -97,8 +95,6 @@ vllm serve "${MODEL}" \
 Notes:
 
 - `MODEL` can be a Hugging Face model ID or a local BART checkpoint path.
-- The `tokenizers==0.22.1` pin avoids a current vLLM-nightly/BART tokenizer
-  construction issue.
 
 ## Send Request
 

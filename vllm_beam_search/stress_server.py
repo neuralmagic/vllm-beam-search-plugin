@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
-from pathlib import Path
 import random
 import subprocess
 import time
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -73,13 +73,19 @@ def _all_pids() -> list[int]:
     ]
 
 
+def _is_server_cmdline(cmd: list[str]) -> bool:
+    if "vllm.entrypoints.openai.api_server" in " ".join(cmd):
+        return True
+    return "serve" in cmd and any(Path(part).name == "vllm" for part in cmd[:2])
+
+
 def _server_roots(port: int) -> list[int]:
     roots = []
     for pid in _all_pids():
         cmd = _proc_cmdline(pid)
         if not cmd:
             continue
-        if "vllm.entrypoints.openai.api_server" not in " ".join(cmd):
+        if not _is_server_cmdline(cmd):
             continue
         if "--port" in cmd:
             idx = cmd.index("--port")

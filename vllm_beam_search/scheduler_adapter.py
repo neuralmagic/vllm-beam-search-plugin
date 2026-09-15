@@ -24,6 +24,8 @@ def _select_vendored_schedule(
         return ".vendored_scheduler_v026", "schedule_v026"
     if has_input_budget and release == (0, 26, 1):
         return ".vendored_scheduler_v0261", "schedule_v0261"
+    if has_input_budget and has_num_running and release == (0, 28, 0):
+        return ".vendored_scheduler_v028", "schedule_v028"
 
     raise RuntimeError(
         "Installed vLLM scheduler is incompatible with the Beam plugin: "
