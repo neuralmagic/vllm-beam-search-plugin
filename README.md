@@ -15,8 +15,9 @@ The sampler hook is model-state generic; BART-family models still need the
 companion `vllm-bart-plugin` for encoder-decoder model support.
 
 The plugin does not require a vLLM fork or source patch. It carries explicit
-plugin-local scheduler implementations for vLLM 0.24.0, 0.26.0, and the tested
-0.26.1 development build. Startup fails closed on an unsupported scheduler.
+plugin-local scheduler implementations for vLLM 0.24.0, 0.26.0, the tested
+0.26.1 development build, and 0.28.0. Startup fails closed on an unsupported
+scheduler.
 Each vendored scheduler has an adjacent `.diff` recording its exact changes
 from the hashed upstream `Scheduler.schedule`; the test suite verifies both.
 
@@ -31,7 +32,7 @@ For BART-family encoder-decoder serving, see
 Install the published distribution from PyPI with an exact version pin:
 
 ```bash
-uv pip install 'vllm-beam-search-plugin==0.1.3'
+uv pip install 'vllm-beam-search-plugin==0.1.4'
 ```
 
 The plugin metadata constrains its tested NumPy, PyTorch, and Triton API ranges.
@@ -41,17 +42,18 @@ plugin:
 
 ```bash
 uv pip install --no-deps \
-  'vllm-beam-search-plugin==0.1.3'
+  'vllm-beam-search-plugin==0.1.4'
 ```
 
-The vLLM 0.24.0 path has been unit-, correctness-, concurrency-, and sustained
-memory-tested. It selects `vendored_scheduler_v024.schedule_v024` directly; it
-does not use `inspect.getsource`, source-text matching, or runtime `exec`.
+The vLLM 0.24.0 and 0.28.0 paths have been unit-, correctness-, concurrency-,
+and sustained-memory-tested. Each selects its explicit vendored scheduler
+directly; the plugin does not use `inspect.getsource`, source-text matching, or
+runtime `exec`.
 
 For stress tooling:
 
 ```bash
-uv pip install 'vllm-beam-search-plugin[stress]==0.1.3'
+uv pip install 'vllm-beam-search-plugin[stress]==0.1.4'
 ```
 
 ## Server
