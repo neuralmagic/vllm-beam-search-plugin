@@ -11,8 +11,12 @@
 +            if len(self.running) + required_slots > self.max_num_running_reqs:
 +                break
 +
-@@ -424 +431,6 @@
+@@ -424 +431,10 @@
 -                num_new_tokens = min(num_new_tokens, token_budget)
++                if not self._beam_encoder_inputs_fit(
++                    request, encoder_compute_budget
++                ):
++                    break
 +                request_token_budget = self._get_request_token_budget(
 +                    request, token_budget, token_budget
 +                )
