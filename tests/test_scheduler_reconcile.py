@@ -188,6 +188,61 @@ def test_beam_group_requires_aggregate_prefill_token_budget() -> None:
     assert enough == 128
 
 
+def make_encoder_budget_scheduler(num_embeds: int = 30):
+    scheduler, group = make_budget_scheduler()
+    for child in group.beam_requests:
+        child.num_computed_tokens = 0
+        child.has_encoder_inputs = True
+        child.mm_features = [SimpleNamespace()]
+        child.get_num_encoder_embeds = lambda _input_id: num_embeds
+    scheduler._beam_encoder_admissions = {}
+    scheduler.is_encoder_decoder = True
+    scheduler.max_num_encoder_input_tokens = 8192
+    scheduler.encoder_cache_manager = SimpleNamespace(num_free_slots=8192)
+    return scheduler, group
+
+
+def test_beam_group_requires_aggregate_encoder_budget() -> None:
+    scheduler, group = make_encoder_budget_scheduler()
+
+    first = scheduler._beam_encoder_inputs_fit(group.beam_requests[0], 119)
+    second = scheduler._beam_encoder_inputs_fit(group.beam_requests[1], 119)
+
+    enough_scheduler, enough_group = make_encoder_budget_scheduler()
+    enough_first = enough_scheduler._beam_encoder_inputs_fit(
+        enough_group.beam_requests[0], 120
+    )
+    enough_group.beam_requests[0].status = RequestStatus.RUNNING
+    enough_second = enough_scheduler._beam_encoder_inputs_fit(
+        enough_group.beam_requests[1], 90
+    )
+
+    assert not first
+    assert not second
+    assert enough_first
+    assert enough_second
+
+
+def test_beam_group_requires_aggregate_encoder_cache_space() -> None:
+    scheduler, group = make_encoder_budget_scheduler()
+    scheduler.encoder_cache_manager.num_free_slots = 119
+
+    assert not scheduler._beam_encoder_inputs_fit(group.beam_requests[0], 8192)
+
+
+def test_oversized_beam_group_encoder_input_is_not_starved() -> None:
+    scheduler, group = make_encoder_budget_scheduler(num_embeds=4096)
+
+    assert scheduler._beam_encoder_inputs_fit(group.beam_requests[0], 4096)
+
+
+def test_decoder_only_encoder_inputs_keep_normal_admission() -> None:
+    scheduler, group = make_encoder_budget_scheduler()
+    scheduler.is_encoder_decoder = False
+
+    assert scheduler._beam_encoder_inputs_fit(group.beam_requests[0], 0)
+
+
 def test_single_request_keeps_normal_budget_cost() -> None:
     scheduler, _group = make_budget_scheduler()
     request = SimpleNamespace(request_id="greedy")
@@ -272,6 +327,7 @@ def test_scheduler_admission_hooks_are_installed_out_of_tree() -> None:
 
     assert "_get_num_required_running_slots" in hook_names
     assert "_get_request_token_budget" in hook_names
+    assert "_beam_encoder_inputs_fit" in hook_names
     if not hasattr(Scheduler, "_get_request_token_budget"):
         assert _RESOURCE_ATOMIC_SCHEDULE is not Scheduler.schedule
 

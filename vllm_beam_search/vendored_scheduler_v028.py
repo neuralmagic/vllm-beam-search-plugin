@@ -484,6 +484,10 @@ def schedule_v028(self, throttle_prefills: bool = False) -> SchedulerOutput:
                 # compute to a cadence-aligned step.
                 break
             else:
+                if not self._beam_encoder_inputs_fit(
+                    request, encoder_compute_budget
+                ):
+                    break
                 request_token_budget = self._get_request_token_budget(
                     request, token_budget, input_budget - draft_slots
                 )

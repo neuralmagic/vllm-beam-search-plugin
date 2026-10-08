@@ -470,6 +470,7 @@ class BeamSearchScheduler(AsyncScheduler):
         self.beam_groups: dict[str, BeamGroup] = {}
         self.beam_to_group: dict[str, str] = {}
         self._beam_token_admissions: dict[str, bool] = {}
+        self._beam_encoder_admissions: dict[str, bool] = {}
 
         # Indices of the decoder (self-attention) KV managers — everything
         # that is not cross-attention. Computed lazily on first use.
@@ -587,6 +588,40 @@ class BeamSearchScheduler(AsyncScheduler):
             admitted = required <= available
             self._beam_token_admissions[group.orig_request_id] = admitted
         return available if admitted else 0
+
+    def _beam_encoder_inputs_fit(
+        self,
+        request: Request,
+        encoder_compute_budget: int,
+    ) -> bool:
+        # Every child carries its own copy of the encoder input. Admitting
+        # only some children splits the group across steps, and the absent
+        # beams lose their first expansion, so admit all-or-nothing.
+        group = self._beam_group_for_request(request)
+        if (
+            group is None
+            or not getattr(self, "is_encoder_decoder", False)
+            or not request.has_encoder_inputs
+        ):
+            return True
+
+        admitted = self._beam_encoder_admissions.get(group.orig_request_id)
+        if admitted is None:
+            required = sum(
+                child.get_num_encoder_embeds(input_id)
+                for child in group.beam_requests
+                if child.request_id in self.requests
+                and child.status != RequestStatus.RUNNING
+                and child.num_computed_tokens == 0
+                for input_id in range(len(child.mm_features or ()))
+            )
+            free_slots = getattr(self.encoder_cache_manager, "num_free_slots", None)
+            admitted = required > self.max_num_encoder_input_tokens or (
+                required <= encoder_compute_budget
+                and (free_slots is None or required <= free_slots)
+            )
+            self._beam_encoder_admissions[group.orig_request_id] = admitted
+        return admitted
 
     def _request_token_demand(self, request: Request) -> int:
         if request.status == RequestStatus.RUNNING:
@@ -787,6 +822,7 @@ class BeamSearchScheduler(AsyncScheduler):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self._beam_token_admissions.clear()
+        self._beam_encoder_admissions.clear()
         scheduler_output = _RESOURCE_ATOMIC_SCHEDULE(self, throttle_prefills)
         self._clamp_async_beam_decode_chunks(scheduler_output)
         return scheduler_output
