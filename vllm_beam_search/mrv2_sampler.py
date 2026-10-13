@@ -22,7 +22,7 @@ from .beam_types import _INIT_NEG, BeamRuntime, BeamTransition
 BEAM_TRANSITIONS_OUTPUT = "vllm_beam_search.transitions"
 _NEG_INF = float("-inf")
 _GroupStateEntry = tuple[str, "_BeamGroupGpuState"]
-_SelectKey = tuple[int, int, int | None]
+_SelectKey = tuple[int, int, tuple[int, ...]]
 _BeamRequest = tuple[int, str, int, BeamRuntime]
 _BEAM_IDX = 0
 _LOGIT_IDX = 1
@@ -66,7 +66,7 @@ class _BeamView:
 
 
 def _beam_select_key(gr: BeamRuntime) -> _SelectKey:
-    return (gr.beam_width, int(gr.no_repeat_ngram_size), gr.eos_token_id)
+    return (gr.beam_width, int(gr.no_repeat_ngram_size), gr.terminal_token_ids)
 
 
 def _empty_beam_view() -> _BeamView:
@@ -1068,6 +1068,7 @@ class BeamSearchMRV2Sampler:
         beam_idx = int(extra["_beam_index"])
         beam_width = int(extra["_beam_width"])
         eos = extra.get("_beam_eos_token_id")
+        stop_ids = tuple(int(t) for t in extra.get("_beam_stop_token_ids", ()))
         no_repeat = int(extra.get("no_repeat_ngram_size", 0))
 
         gr = self.groups.get(gid)
@@ -1075,6 +1076,7 @@ class BeamSearchMRV2Sampler:
             gr = BeamRuntime(
                 beam_width=beam_width,
                 eos_token_id=int(eos) if eos is not None else None,
+                stop_token_ids=stop_ids,
                 no_repeat_ngram_size=no_repeat,
                 prompt_tokens=list(prompt_token_ids or []),
                 max_tokens=sampling_params.max_tokens,
@@ -1223,7 +1225,7 @@ class BeamSearchMRV2Sampler:
         if key is None:
             return None
 
-        bw, no_repeat, eos = key
+        bw, no_repeat, terminal_ids = key
         device = processed_logits.device
         group_count = len(group_states)
         lengths_cpu = [state.length for _gid, state in group_states]
@@ -1293,7 +1295,24 @@ class BeamSearchMRV2Sampler:
         eos_completion_scores = None
         completion_slots = None
         completion_tokens = None
-        if eos is not None:
+        if terminal_ids:
+            # Single-EOS requests (the common case) keep the original scalar
+            # comparison and skip the per-step host-to-device copy.
+            if len(terminal_ids) == 1:
+                (eos,) = terminal_ids
+
+                def is_terminal(tokens: torch.Tensor) -> torch.Tensor:
+                    return tokens == eos
+            else:
+                terminal = _copy_cpu_values_to_gpu(
+                    list(terminal_ids),
+                    dtype=ids.dtype,
+                    device=device,
+                )
+
+                def is_terminal(tokens: torch.Tensor) -> torch.Tensor:
+                    return torch.isin(tokens, terminal)
+
             flat_scores_all, flat_idx_all = torch.topk(
                 scores.reshape(group_count, -1),
                 min(2 * bw, scores.shape[1] * scores.shape[2]),
@@ -1301,7 +1320,7 @@ class BeamSearchMRV2Sampler:
             )
             src_pos_all = flat_idx_all // k
             tok_all = ids.reshape(group_count, -1).gather(1, flat_idx_all)
-            eos_mask = tok_all == int(eos)
+            eos_mask = is_terminal(tok_all)
             rank = torch.arange(
                 flat_scores_all.shape[1],
                 device=device,
@@ -1313,7 +1332,7 @@ class BeamSearchMRV2Sampler:
             )
             completion_slots = beam_indices.gather(1, src_pos_all)
             completion_tokens = tok_all
-            scores = scores.masked_fill(ids == int(eos), _NEG_INF)
+            scores = scores.masked_fill(is_terminal(ids), _NEG_INF)
 
         # Global per-group top-k over beam slots x token candidates.
         flat_scores, flat_idx = torch.topk(

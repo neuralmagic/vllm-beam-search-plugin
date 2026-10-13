@@ -744,6 +744,56 @@ def test_select_materializes_eos_completions() -> None:
     assert by_gid["g1"].completions[0][0] == (21, 22, 2)
 
 
+def test_select_completes_on_any_stop_token() -> None:
+    # Models such as Qwen2.5 and Llama 3 stop on several token ids. A beam
+    # that picks a non-EOS stop token must complete, not stay live: vLLM
+    # stops the child request on it, which used to leave the group empty.
+    sampler = BeamSearchMRV2Sampler.__new__(BeamSearchMRV2Sampler)
+    sampler.req_to_group = {"g0:beam:0": ("g0", 0), "g0:beam:1": ("g0", 1)}
+    sampler.groups = {
+        "g0": BeamRuntime(
+            beam_width=2,
+            eos_token_id=2,
+            no_repeat_ngram_size=0,
+            prompt_tokens=[],
+            stop_token_ids=(2, 3),
+        )
+    }
+    pool = _BeamGroupStatePool(beam_width=2, max_len=5, device=DEVICE, capacity=2)
+    state, _tokens = _pooled_state(
+        pool=pool,
+        tokens=torch.tensor(
+            [[101, 11, 12, 0, 0], [101, 13, 14, 0, 0]],
+            dtype=torch.int32,
+            device=DEVICE,
+        ),
+        cum=torch.tensor([0.0, _INIT_NEG], dtype=torch.float32, device=DEVICE),
+        length=3,
+        prompt_len=1,
+    )
+    sampler._gpu_group_state = {"g0": state}
+    logits = torch.full((2, 12), -100.0, dtype=torch.float32, device=DEVICE)
+    logits[0, 3] = 10.0
+    logits[0, 5] = 9.0
+    logits[0, 6] = 8.0
+
+    transitions = sampler._gpu_select_groups(
+        processed_logits=logits,
+        input_batch=SimpleNamespace(
+            req_ids=["g0:beam:0", "g0:beam:1"],
+            cu_num_logits_np=np.array([0, 1, 2], dtype=np.int32),
+        ),
+        sampled=torch.zeros(2, dtype=torch.int64, device=DEVICE),
+    )
+
+    assert transitions is not None
+    staged = AsyncBeamTransitions(transitions).to_cpu_nonblocking()
+    torch.cuda.synchronize()
+    (transition,) = staged.to_output()
+    assert transition.completions[0][0] == (11, 12, 3)
+    assert sorted(transition.tokens[:, -1].tolist()) == [5, 6]
+
+
 def test_async_beam_transitions_use_persistent_gpu_slot_buffer() -> None:
     pool = _TransitionBufferPool(num_slots=2)
     gpu_transitions = _BeamTransitionsGpu(

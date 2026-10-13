@@ -25,3 +25,13 @@ class BeamRuntime:
     no_repeat_ngram_size: int = 0
     prompt_tokens: list[int] = field(default_factory=list)
     max_tokens: int | None = None
+    # Every token that ends a hypothesis (EOS plus the request's other stop
+    # token ids). Empty means only `eos_token_id`.
+    stop_token_ids: tuple[int, ...] = ()
+
+    @property
+    def terminal_token_ids(self) -> tuple[int, ...]:
+        ids = set(self.stop_token_ids)
+        if self.eos_token_id is not None:
+            ids.add(self.eos_token_id)
+        return tuple(sorted(ids))
