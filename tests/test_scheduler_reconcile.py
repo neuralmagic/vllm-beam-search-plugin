@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from vllm.exceptions import VLLMValidationError
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine import FinishReason
 from vllm.v1.request import RequestStatus
 
 from vllm_beam_search.beam_state import BeamGroup
@@ -547,3 +548,41 @@ def test_group_finalizes_when_async_terminal_output_has_no_transition() -> None:
 
     scheduler.requests[group.beam_request_ids[0]] = SimpleNamespace()
     assert not scheduler._should_finalize_group(group, None, [0, 1], set())
+
+
+def _stop_group(**sampling_params) -> SimpleNamespace:
+    return SimpleNamespace(
+        orig_request=SimpleNamespace(
+            sampling_params=SimpleNamespace(**sampling_params),
+        ),
+    )
+
+
+def test_beam_children_complete_on_every_stop_token() -> None:
+    group = _stop_group(eos_token_id=151645, all_stop_token_ids={151643, 151645})
+
+    assert BeamSearchScheduler._stop_token_ids(group.orig_request) == (
+        151643,
+        151645,
+    )
+
+
+def test_completion_ending_in_stop_token_gets_no_extra_eos() -> None:
+    group = _stop_group(eos_token_id=2, all_stop_token_ids={2, 3})
+
+    assert BeamSearchScheduler._tokens_with_eos(group, [5, 3]) == [5, 3]
+    assert BeamSearchScheduler._tokens_with_eos(group, [5]) == [5, 2]
+
+
+def test_group_without_beams_still_finishes_parent(monkeypatch) -> None:
+    scheduler = BeamSearchScheduler.__new__(BeamSearchScheduler)
+    monkeypatch.setattr(scheduler, "_finish_group_children", lambda group: None)
+    monkeypatch.setattr(scheduler, "_cleanup_group", lambda group: None)
+    group = BeamGroup("request", SimpleNamespace(client_index=0), 2)
+    outputs = {}
+
+    scheduler._finalize_group(group, outputs, None)
+
+    (output,) = outputs[0].outputs
+    assert output.request_id == "request"
+    assert output.finish_reason == FinishReason.ERROR

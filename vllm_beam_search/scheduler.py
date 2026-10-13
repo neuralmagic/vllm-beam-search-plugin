@@ -678,6 +678,11 @@ class BeamSearchScheduler(AsyncScheduler):
         )
         if eos_token_id is not None:
             extra["_beam_eos_token_id"] = eos_token_id
+        # vLLM stops a child on any of these, so the sampler must treat each
+        # one as a completed hypothesis rather than a live continuation.
+        stop_token_ids = self._stop_token_ids(orig)
+        if stop_token_ids:
+            extra["_beam_stop_token_ids"] = list(stop_token_ids)
         sp.extra_args = extra
 
         mm = ([copy.copy(f) for f in orig.mm_features]
@@ -1187,8 +1192,11 @@ class BeamSearchScheduler(AsyncScheduler):
             )
             self._emit_parent_output(group, outputs, final_tokens, finish_reason)
         else:
+            # Never leave the parent request without a final output; the
+            # client would otherwise wait forever.
             logger.warning("Beam group %s finalized with no beams.",
                            group.orig_request_id)
+            self._emit_parent_output(group, outputs, [], FinishReason.ERROR)
 
         self._finish_group_children(group)
         self._cleanup_group(group)
@@ -1258,7 +1266,17 @@ class BeamSearchScheduler(AsyncScheduler):
         return list(tokens[:max_tokens])
 
     @staticmethod
-    def _tokens_with_eos(group: BeamGroup, tokens: list[int]) -> list[int]:
+    def _stop_token_ids(request: Request) -> tuple[int, ...]:
+        sampling_params = request.sampling_params
+        if sampling_params is None:
+            return ()
+        ids = set(getattr(sampling_params, "all_stop_token_ids", ()))
+        if getattr(sampling_params, "eos_token_id", None) is not None:
+            ids.add(sampling_params.eos_token_id)
+        return tuple(sorted(ids))
+
+    @classmethod
+    def _tokens_with_eos(cls, group: BeamGroup, tokens: list[int]) -> list[int]:
         final_tokens = list(tokens)
         # The V1 incremental detokenizer holds the most-recent token pending a
         # lookahead. EOS is skipped as a special token and flushes the last word.
@@ -1267,7 +1285,8 @@ class BeamSearchScheduler(AsyncScheduler):
             if group.orig_request.sampling_params is not None
             else None
         )
-        if eos is not None and (not final_tokens or final_tokens[-1] != eos):
+        stop_ids = cls._stop_token_ids(group.orig_request)
+        if eos is not None and (not final_tokens or final_tokens[-1] not in stop_ids):
             final_tokens.append(eos)
         return final_tokens
 
