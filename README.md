@@ -16,8 +16,8 @@ companion `vllm-bart-plugin` for encoder-decoder model support.
 
 The plugin does not require a vLLM fork or source patch. It carries explicit
 plugin-local scheduler implementations for vLLM 0.24.0, 0.26.0, the tested
-0.26.1 development build, and 0.28.0. Startup fails closed on an unsupported
-scheduler.
+0.26.1 development build, 0.28.0, and 0.31.0. Startup fails closed on an
+unsupported scheduler.
 Each vendored scheduler has an adjacent `.diff` recording its exact changes
 from the hashed upstream `Scheduler.schedule`; the test suite verifies both.
 
@@ -46,9 +46,10 @@ uv pip install --no-deps \
 ```
 
 The vLLM 0.24.0 and 0.28.0 paths have been unit-, correctness-, concurrency-,
-and sustained-memory-tested. Each selects its explicit vendored scheduler
-directly; the plugin does not use `inspect.getsource`, source-text matching, or
-runtime `exec`.
+and sustained-memory-tested. The vLLM 0.31.0 path has been unit-, correctness-,
+and concurrency-tested with decoder-only models. Each selects its explicit
+vendored scheduler directly; the plugin does not use `inspect.getsource`,
+source-text matching, or runtime `exec`.
 
 For stress tooling:
 

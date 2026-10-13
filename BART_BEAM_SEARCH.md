@@ -6,6 +6,9 @@ scheduler. It requires both plugins in the same vLLM environment:
 - `vllm-bart-plugin` for BART model and prompt support
 - `vllm-beam-search-plugin` for the MRV2 beam scheduler and sampler
 
+The beam-search plugin supports vLLM 0.31.0, but at the time of writing
+`vllm-bart-plugin` does not, so BART serving still uses vLLM 0.28.0 below.
+
 ## Install
 
 Install vLLM first, then install both plugins into that environment:

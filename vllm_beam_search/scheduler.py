@@ -287,9 +287,10 @@ def _patch_mrv2_gpu_model_runner_history_rewrites() -> None:
         )
         _configure_beam_sampler_from_model_state(model_state)
 
-    def patched_initialize_kv_cache(self, kv_cache_config):
-        original_initialize_kv_cache(self, kv_cache_config)
+    def patched_initialize_kv_cache(self, kv_cache_config, *args, **kwargs):
+        result = original_initialize_kv_cache(self, kv_cache_config, *args, **kwargs)
         _bind_beam_worker_state(self)
+        return result
 
     GPUModelRunner.initialize_kv_cache = patched_initialize_kv_cache
     GPUModelRunner._vllm_beam_history_rewrite_patched = True

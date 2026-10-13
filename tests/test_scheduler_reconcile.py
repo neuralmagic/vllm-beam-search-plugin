@@ -387,6 +387,12 @@ def test_vendored_scheduler_diff_matches_record() -> None:
             ("num_running", "input_budget"),
             "schedule_v028",
         ),
+        ((0, 31, 0), ("num_running", "input_budget"), "schedule_v031"),
+        (
+            (0, 31, 0, "cu130"),
+            ("num_running", "input_budget"),
+            "schedule_v031",
+        ),
     ],
 )
 def test_scheduler_selects_explicit_vllm_implementation(
