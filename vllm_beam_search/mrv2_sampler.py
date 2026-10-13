@@ -1017,21 +1017,20 @@ class BeamSearchMRV2Sampler:
         self._gpu_group_state: dict[str, _BeamGroupGpuState] = {}
         self._gpu_state_pools: dict[int, _BeamGroupStatePool] = {}
         self._transition_buffer_pool = _TransitionBufferPool()
-        self._sampling_params_accepts_idx_mapping = (
-            "idx_mapping"
-            in inspect.signature(base_sampler.apply_sampling_params).parameters
+        sampling_params = inspect.signature(
+            base_sampler.apply_sampling_params
+        ).parameters
+        self._sampling_params_accepts_idx_mapping = "idx_mapping" in sampling_params
+        self._sampling_params_accepts_seq_lens = (
+            "seq_lens_upper_bound_np" in sampling_params
         )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.base_sampler, name)
 
-    def add_request(
-        self,
-        req_idx: int,
-        prompt_len: int,
-        sampling_params: SamplingParams,
-    ) -> None:
-        self.base_sampler.add_request(req_idx, prompt_len, sampling_params)
+    def add_request(self, req_idx: int, *args: Any) -> None:
+        # vLLM 0.31 dropped the prompt_len argument.
+        self.base_sampler.add_request(req_idx, *args)
 
     def apply_staged_writes(self) -> None:
         self.base_sampler.apply_staged_writes()
@@ -1159,6 +1158,10 @@ class BeamSearchMRV2Sampler:
         }
         if self._sampling_params_accepts_idx_mapping:
             sampling_kwargs["idx_mapping"] = input_batch.idx_mapping
+        if self._sampling_params_accepts_seq_lens:
+            sampling_kwargs["seq_lens_upper_bound_np"] = (
+                input_batch.seq_lens_cpu_upper_bound.numpy()
+            )
         processed_logits = sampler.apply_sampling_params(**sampling_kwargs)
 
         return self._sample_with_gpu_beam_select(

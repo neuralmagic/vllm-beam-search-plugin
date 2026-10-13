@@ -149,9 +149,52 @@ class _ModernSampler(_LegacySampler):
         return logits
 
 
+class _V031Sampler:
+    def apply_sampling_params(
+        self,
+        logits,
+        expanded_idx_mapping,
+        idx_mapping,
+        idx_mapping_np,
+        pos,
+        input_ids,
+        expanded_local_pos,
+        seq_lens_upper_bound_np,
+        skip_top_k_top_p=False,
+    ):
+        return logits
+
+
 def test_beam_sampler_detects_legacy_sampling_signature():
     legacy = BeamSearchMRV2Sampler(_LegacySampler(), None, None)
     modern = BeamSearchMRV2Sampler(_ModernSampler(), None, None)
+    v031 = BeamSearchMRV2Sampler(_V031Sampler(), None, None)
 
     assert not legacy._sampling_params_accepts_idx_mapping
     assert modern._sampling_params_accepts_idx_mapping
+    assert not modern._sampling_params_accepts_seq_lens
+    assert v031._sampling_params_accepts_idx_mapping
+    assert v031._sampling_params_accepts_seq_lens
+
+
+def test_kv_cache_hook_forwards_runner_arguments(monkeypatch):
+    # vLLM 0.31 added keyword arguments to GPUModelRunner.initialize_kv_cache.
+    import vllm.v1.worker.gpu.model_runner as model_runner_module
+
+    from vllm_beam_search.scheduler import (
+        _patch_mrv2_gpu_model_runner_history_rewrites,
+    )
+
+    class _FakeRunner:
+        model_state = None
+
+        def initialize_kv_cache(self, kv_cache_config, is_profiling=False):
+            self.received = (kv_cache_config, is_profiling)
+            return "initialized"
+
+    monkeypatch.setattr(model_runner_module, "GPUModelRunner", _FakeRunner)
+    _patch_mrv2_gpu_model_runner_history_rewrites()
+
+    runner = _FakeRunner()
+    assert runner.initialize_kv_cache("config", is_profiling=True) == "initialized"
+    assert runner.received == ("config", True)
