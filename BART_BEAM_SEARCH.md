@@ -6,15 +6,15 @@ scheduler. It requires both plugins in the same vLLM environment:
 - `vllm-bart-plugin` for BART model and prompt support
 - `vllm-beam-search-plugin` for the MRV2 beam scheduler and sampler
 
-The beam-search plugin supports vLLM 0.31.0, but at the time of writing
-`vllm-bart-plugin` does not, so BART serving still uses vLLM 0.28.0 below.
+The commands below use vLLM 0.33.0 with `vllm-bart-plugin` v0.6.3, the
+combination tested with this release.
 
 ## Install
 
 Install vLLM first, then install both plugins into that environment:
 
 ```bash
-uv pip install 'vllm==0.28.0'
+uv pip install 'vllm==0.33.0'
 
 cd <bart-plugin-checkout>
 uv pip install -e .
@@ -32,7 +32,7 @@ export VLLM_PLUGINS=bart,beam_search
 
 ## One-Shot Environment
 
-To run the supported vLLM 0.28.0 build without installing into the current
+To run the supported vLLM 0.33.0 build without installing into the current
 environment, use an isolated `uv run` environment:
 
 ```bash
@@ -46,7 +46,7 @@ VLLM_PLUGINS=bart,beam_search \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
 UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
-  --with 'vllm==0.28.0' \
+  --with 'vllm==0.33.0' \
   --with-editable "${BART_PLUGIN}" \
   --with-editable "${BEAM_PLUGIN}" \
   vllm serve "${MODEL}" \
@@ -61,7 +61,7 @@ For published or pinned GitHub releases, use `--with` instead of
 are installed as normal packages:
 
 ```bash
-BART_PLUGIN_REF=${BART_PLUGIN_REF:-v0.6.0}
+BART_PLUGIN_REF=${BART_PLUGIN_REF:-v0.6.3}
 MODEL=${MODEL:-facebook/bart-large-cnn}
 SERVED_MODEL=${SERVED_MODEL:-bart}
 
@@ -70,7 +70,7 @@ VLLM_PLUGINS=bart,beam_search \
 VLLM_USE_FLASHINFER_SAMPLER=0 \
 UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
-  --with 'vllm==0.28.0' \
+  --with 'vllm==0.33.0' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
   --with 'vllm-beam-search-plugin==0.1.4' \
   vllm serve "${MODEL}" \

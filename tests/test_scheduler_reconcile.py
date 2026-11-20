@@ -393,6 +393,12 @@ def test_vendored_scheduler_diff_matches_record() -> None:
             ("num_running", "input_budget"),
             "schedule_v031",
         ),
+        ((0, 33, 0), ("num_running", "input_budget"), "schedule_v033"),
+        (
+            (0, 33, 0, "cu130"),
+            ("num_running", "input_budget"),
+            "schedule_v033",
+        ),
     ],
 )
 def test_scheduler_selects_explicit_vllm_implementation(
@@ -412,6 +418,8 @@ def test_scheduler_selection_fails_closed_on_unknown_vllm() -> None:
         _select_vendored_schedule((0, 27, 0), ("input_budget",))
     with pytest.raises(RuntimeError, match="unsupported scheduler"):
         _select_vendored_schedule((0, 29, 0), ("num_running", "input_budget"))
+    with pytest.raises(RuntimeError, match="unsupported scheduler"):
+        _select_vendored_schedule((0, 32, 0), ("num_running", "input_budget"))
 
 
 def test_beam_completion_is_capped_at_public_max_tokens() -> None:
