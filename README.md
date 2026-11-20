@@ -32,7 +32,7 @@ For BART-family encoder-decoder serving, see
 Install the published distribution from PyPI with an exact version pin:
 
 ```bash
-uv pip install 'vllm-beam-search-plugin==0.1.5'
+uv pip install 'vllm-beam-search-plugin==0.1.6'
 ```
 
 The plugin metadata constrains its tested NumPy, PyTorch, and Triton API ranges.
@@ -42,7 +42,7 @@ plugin:
 
 ```bash
 uv pip install --no-deps \
-  'vllm-beam-search-plugin==0.1.5'
+  'vllm-beam-search-plugin==0.1.6'
 ```
 
 The vLLM 0.24.0 and 0.28.0 paths have been unit-, correctness-, concurrency-,
@@ -55,7 +55,7 @@ use `inspect.getsource`, source-text matching, or runtime `exec`.
 For stress tooling:
 
 ```bash
-uv pip install 'vllm-beam-search-plugin[stress]==0.1.5'
+uv pip install 'vllm-beam-search-plugin[stress]==0.1.6'
 ```
 
 ## Server

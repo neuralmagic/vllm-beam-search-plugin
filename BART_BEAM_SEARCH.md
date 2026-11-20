@@ -72,7 +72,7 @@ UV_TORCH_BACKEND=auto \
 uv run --isolated --python 3.12 \
   --with 'vllm==0.33.0' \
   --with "vllm-bart-plugin @ git+https://github.com/vllm-project/bart-plugin.git@${BART_PLUGIN_REF}" \
-  --with 'vllm-beam-search-plugin==0.1.4' \
+  --with 'vllm-beam-search-plugin==0.1.6' \
   vllm serve "${MODEL}" \
   --served-model-name "${SERVED_MODEL}" \
   --dtype float16 \
